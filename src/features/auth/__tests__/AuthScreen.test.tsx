@@ -73,4 +73,35 @@ describe("AuthScreen (FR-006)", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/at least 6 characters/i);
     expect(auth.signUp).not.toHaveBeenCalled();
   });
+
+  it("shows 'signing you in' after sign-up when Supabase returns a session immediately", async () => {
+    auth.signUp.mockResolvedValueOnce({
+      data: { session: { user: { id: "u1", email: "new@example.com" } } },
+      error: null,
+    });
+    renderAuthScreen();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Create an account" }));
+    await user.type(screen.getByLabelText("Email"), "new@example.com");
+    await user.type(screen.getByLabelText("Password"), "longenough");
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(/signing you in/i);
+  });
+
+  it("never falsely claims sign-in when the project requires email confirmation (no session returned)", async () => {
+    auth.signUp.mockResolvedValueOnce({ data: { session: null }, error: null });
+    renderAuthScreen();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Create an account" }));
+    await user.type(screen.getByLabelText("Email"), "pending@example.com");
+    await user.type(screen.getByLabelText("Password"), "longenough");
+    await user.click(screen.getByRole("button", { name: "Sign up" }));
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent(/check your email/i);
+    expect(status).not.toHaveTextContent(/signing you in/i);
+  });
 });

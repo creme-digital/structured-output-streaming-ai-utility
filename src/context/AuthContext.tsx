@@ -4,6 +4,12 @@ import { supabase } from "../lib/supabaseClient";
 
 export interface AuthResult {
   error: string | null;
+  /**
+   * True when sign-up succeeded but Supabase did NOT return a session — i.e. the
+   * project requires email confirmation before the account can log in. Callers
+   * must not assume a successful sign-up means the user is now authenticated.
+   */
+  needsEmailConfirmation?: boolean;
 }
 
 interface AuthContextValue {
@@ -56,8 +62,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user: session?.user ?? null,
       initializing,
       async signUp(email, password) {
-        const { error } = await supabase.auth.signUp({ email, password });
-        return { error: error ? friendlyAuthError(error.message) : null };
+        const { data, error } = await supabase.auth.signUp({ email, password });
+        if (error) {
+          return { error: friendlyAuthError(error.message) };
+        }
+        // Supabase returns no session when the project requires email confirmation
+        // before first login — the account exists but isn't signed in yet. Surface
+        // that distinction so the UI never claims a sign-in that didn't happen.
+        return { error: null, needsEmailConfirmation: !data.session };
       },
       async signIn(email, password) {
         const { error } = await supabase.auth.signInWithPassword({ email, password });

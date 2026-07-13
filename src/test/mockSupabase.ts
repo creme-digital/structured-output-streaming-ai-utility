@@ -65,7 +65,12 @@ export function createFakeSupabaseAuth() {
       Promise.resolve<{ data: { session: FakeSession | null } }>({ data: { session: null } }),
     ),
     onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe: vi.fn() } } })),
-    signUp: vi.fn(() => Promise.resolve<{ error: FakeError | null }>({ error: null })),
+    signUp: vi.fn(() =>
+      Promise.resolve<{ data: { session: FakeSession | null }; error: FakeError | null }>({
+        data: { session: { user: { id: "new-user", email: "new@example.com" } } },
+        error: null,
+      }),
+    ),
     signInWithPassword: vi.fn(() => Promise.resolve<{ error: FakeError | null }>({ error: null })),
     signOut: vi.fn(() => Promise.resolve<{ error: FakeError | null }>({ error: null })),
   };

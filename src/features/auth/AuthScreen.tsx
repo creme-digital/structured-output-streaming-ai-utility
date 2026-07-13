@@ -18,6 +18,7 @@ export function AuthScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [signUpComplete, setSignUpComplete] = useState(false);
+  const [needsEmailConfirmation, setNeedsEmailConfirmation] = useState(false);
 
   const isSignUp = mode === "sign-up";
 
@@ -42,7 +43,17 @@ export function AuthScreen() {
         return;
       }
       if (isSignUp) {
-        setSignUpComplete(true);
+        // Sign-up succeeding does NOT always mean the user is now logged in — if the
+        // project requires email confirmation, Supabase returns no session and the
+        // account can't sign in until that link is clicked. Never claim "signing you
+        // in" unless that's actually what's about to happen.
+        if (result.needsEmailConfirmation) {
+          setNeedsEmailConfirmation(true);
+          setSignUpComplete(false);
+        } else {
+          setSignUpComplete(true);
+          setNeedsEmailConfirmation(false);
+        }
       }
     } catch {
       setError("Something went wrong reaching the server. Please try again.");
@@ -55,6 +66,7 @@ export function AuthScreen() {
     setMode(next);
     setError(null);
     setSignUpComplete(false);
+    setNeedsEmailConfirmation(false);
   }
 
   return (
@@ -76,6 +88,11 @@ export function AuthScreen() {
           {signUpComplete && !error && (
             <p className="auth-form__success" role="status">
               Account created — signing you in...
+            </p>
+          )}
+          {needsEmailConfirmation && !error && (
+            <p className="auth-form__success" role="status">
+              Account created — check your email for a confirmation link, then sign in below.
             </p>
           )}
 

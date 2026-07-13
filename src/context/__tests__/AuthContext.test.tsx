@@ -44,7 +44,7 @@ describe("AuthContext (FR-006)", () => {
   });
 
   it("signUp calls supabase.auth.signUp and passes through a friendly duplicate-account error", async () => {
-    auth.signUp.mockResolvedValueOnce({ error: { message: "User already registered" } });
+    auth.signUp.mockResolvedValueOnce({ data: { session: null }, error: { message: "User already registered" } });
     const { result } = renderHook(() => useAuth(), { wrapper });
     await waitFor(() => expect(result.current.initializing).toBe(false));
 
@@ -56,6 +56,38 @@ describe("AuthContext (FR-006)", () => {
     expect(response).toEqual({
       error: "An account with that email already exists — try signing in instead.",
     });
+  });
+
+  it("signUp reports no email-confirmation needed when Supabase returns a session immediately", async () => {
+    auth.signUp.mockResolvedValueOnce({
+      data: { session: { user: { id: "u1", email: "new@example.com" } } },
+      error: null,
+    });
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.initializing).toBe(false));
+
+    let response;
+    await act(async () => {
+      response = await result.current.signUp("new@example.com", "password123");
+    });
+
+    expect(response).toEqual({ error: null, needsEmailConfirmation: false });
+  });
+
+  it("signUp flags needsEmailConfirmation when the project requires confirming email before login (no session returned)", async () => {
+    auth.signUp.mockResolvedValueOnce({
+      data: { session: null },
+      error: null,
+    });
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.initializing).toBe(false));
+
+    let response;
+    await act(async () => {
+      response = await result.current.signUp("pending@example.com", "password123");
+    });
+
+    expect(response).toEqual({ error: null, needsEmailConfirmation: true });
   });
 
   it("signOut calls supabase.auth.signOut", async () => {
