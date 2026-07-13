@@ -1,0 +1,43 @@
+.ui-spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ui-spinner__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+  animation: ui-spinner-bounce 1s infinite ease-in-out both;
+}
+
+.ui-spinner__dot:nth-child(1) {
+  animation-delay: -0.24s;
+}
+
+.ui-spinner__dot:nth-child(2) {
+  animation-delay: -0.12s;
+}
+
+.ui-spinner__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+@keyframes ui-spinner-bounce {
+  0%,
+  80%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.5;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}

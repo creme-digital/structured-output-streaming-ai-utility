@@ -1,0 +1,91 @@
+/*
+ * Theme tokens for the Structured-Output & Streaming AI Utility demo.
+ *
+ * Design intent (see DESIGN.md): a clean, minimal, standard chat-bubble
+ * interface with no client branding. One accent color carries the user's
+ * voice in the conversation; everything else stays neutral so the two
+ * things that must be visually obvious - live token streaming and a
+ * successful database write - are never competing with decoration.
+ */
+
+:root {
+  /* Color: neutral surface + text scale */
+  --color-bg: #f6f6f8;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #f0f1f4;
+  --color-border: #e2e3e8;
+  --color-border-strong: #cbccd4;
+
+  --color-text: #16171b;
+  --color-text-muted: #6b6f76;
+  --color-text-faint: #9497a1;
+
+  /* Color: single accent, used sparingly (primary actions, user bubble, links) */
+  --color-accent: #4338ca;
+  --color-accent-hover: #3730a3;
+  --color-accent-contrast: #ffffff;
+  --color-accent-soft: #eeecfd;
+
+  /* Color: semantic feedback (write confirmation / graceful failure) */
+  --color-success: #15803d;
+  --color-success-bg: #e9f7ef;
+  --color-success-border: #bfe6cd;
+
+  --color-danger: #b91c1c;
+  --color-danger-bg: #fceeed;
+  --color-danger-border: #f2c9c6;
+
+  /* Color: chat bubbles */
+  --color-bubble-assistant-bg: var(--color-surface-sunken);
+  --color-bubble-assistant-text: var(--color-text);
+  --color-bubble-user-bg: var(--color-accent);
+  --color-bubble-user-text: var(--color-accent-contrast);
+
+  /* Typography */
+  --font-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.8125rem;
+  --font-size-md: 0.9375rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.375rem;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  --line-height-tight: 1.25;
+  --line-height-base: 1.55;
+
+  /* Spacing scale (4px base unit) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* Radius */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-bubble: 18px;
+  --radius-pill: 999px;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(17, 17, 20, 0.06);
+  --shadow-md: 0 8px 24px rgba(17, 17, 20, 0.08);
+
+  /* Motion */
+  --transition-fast: 120ms ease;
+  --transition-base: 200ms ease;
+
+  /* Layout */
+  --content-max-width: 720px;
+  --header-height: 56px;
+}
