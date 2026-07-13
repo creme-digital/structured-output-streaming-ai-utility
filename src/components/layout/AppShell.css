@@ -34,6 +34,17 @@
   gap: var(--space-3);
 }
 
+.app-shell__user {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.app-shell__loading {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-7);
+}
+
 .app-shell__main {
   flex: 1;
   display: flex;
