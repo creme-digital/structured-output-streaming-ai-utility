@@ -21,10 +21,13 @@
   --color-text-faint: #9497a1;
 
   /* Color: single accent, used sparingly (primary actions, user bubble, links) */
-  --color-accent: #4338ca;
-  --color-accent-hover: #3730a3;
-  --color-accent-contrast: #ffffff;
-  --color-accent-soft: #eeecfd;
+  /* Soft slate blue per PRD FR-005 (change_log v2, re-affirmed v4). Contrast text on
+     accent surfaces is dark (--color-accent-contrast), not white: white-on-#A0B9BF
+     measures ~2:1 (fails WCAG), dark-on-#A0B9BF measures ~8.7:1. See DESIGN.md Cycle 3. */
+  --color-accent: #a0b9bf;
+  --color-accent-hover: #8ba7ae;
+  --color-accent-contrast: #16171b;
+  --color-accent-soft: #dbe4e7;
 
   /* Color: semantic feedback (write confirmation / graceful failure) */
   --color-success: #15803d;

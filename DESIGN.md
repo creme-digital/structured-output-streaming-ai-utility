@@ -99,3 +99,44 @@ Per this step's scope: auth screens/flows, the chat function and OpenAI call, th
 streaming consumer, the tag parser, all Supabase reads/writes, and all tests. No
 database schema or migrations were touched. The theme and primitives above are meant to
 make that step purely "wire behavior into existing components," not "invent UI."
+
+## Cycle 3 (PRD v4 — recolor re-affirmation)
+
+The work order for this cycle frames the #A0B9BF recolor as an idempotent re-run of the
+v2 change ("that change already shipped in v2... byte-identical to the v2 outcome").
+That framing did not match the repo: git history shows only a single prior
+design/build/qa/docs cycle (PRD v1), and `theme.css` still had the original purple
+accent (`#4338ca`) — the v2/v3 change_log entries were never actually built. This was
+flagged as a soft blocker for the record; since FR-005's target color and scope are
+unambiguous, the fix proceeded without waiting.
+
+**What changed** — `src/styles/theme.css` only, four tokens:
+
+| Token | Before | After |
+|---|---|---|
+| `--color-accent` | `#4338ca` | `#a0b9bf` |
+| `--color-accent-hover` | `#3730a3` | `#8ba7ae` (darkened for hover affordance) |
+| `--color-accent-contrast` | `#ffffff` | `#16171b` (see below) |
+| `--color-accent-soft` | `#eeecfd` | `#dbe4e7` |
+
+**Contrast fix, not a cosmetic tweak**: white text on `#A0B9BF` measures ~2.1:1
+(fails WCAG AA's 4.5:1, and the PRD explicitly warns against "white-on-light-blue
+illegibility"). Dark text (`#16171b`, matching `--color-text`) on `#A0B9BF` measures
+~8.7:1. `--color-accent-contrast` now resolves to the dark value, so primary buttons
+and the user's chat bubble (both of which render their label/content in
+`--color-accent-contrast` on an `--color-accent` background) stay readable.
+
+**Confirmed no other files hardcode purple** — every component CSS file references the
+token (`var(--color-accent...)`), never a raw hex, so this is a complete, single-source
+recolor with zero component-level changes required. `global.css`'s generic `a { color:
+var(--color-accent) }` and `:focus-visible` outline also now resolve to the new color
+per the PRD's explicit "links/focus rings" enumeration; note there are currently no
+live `<a>` tags in the app (the auth screen's mode-toggle is a ghost `Button`, styled
+neutral gray, not accent), so this only affects the focus-visible outline in practice.
+The outline's contrast against a white background is lower than before (~2:1 vs. the
+old ~7.9:1) — kept as directed since the PRD names focus rings explicitly and its
+contrast acceptance criterion is scoped to text/icons *on* accent surfaces, not the
+accent's use as an outline color; noting this here rather than silently deviating or
+silently under-fixing.
+
+No components, layout, or primitives changed — this cycle is theme-tokens only.
