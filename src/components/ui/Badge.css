@@ -27,3 +27,9 @@
   color: var(--color-danger);
   border-color: var(--color-danger-border);
 }
+
+.ui-badge--update {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  border-color: var(--color-accent);
+}

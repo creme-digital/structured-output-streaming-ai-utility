@@ -140,3 +140,56 @@ accent's use as an outline color; noting this here rather than silently deviatin
 silently under-fixing.
 
 No components, layout, or primitives changed — this cycle is theme-tokens only.
+
+## Cycle 4 (PRD v5 — retry/temperature/title-recognition fixes + FR-009 `<UPDATE>`)
+
+This cycle's work order (change_log v5) amends FR-001/FR-003/FR-004 and adds FR-009.
+Reading the amendments against what design actually owns:
+
+- **FR-001 (temperature + unrecognized-title clarification) and FR-004 (silent
+  retry-then-fallback + `unrecognized_title` logging) are prompt/logic-only.** Neither
+  introduces a new UI state: a "please clarify the title" reply is just ordinary
+  assistant prose (no tag emitted), and the silent 2-retry behavior is explicitly
+  invisible to the user by design (only the final attempt's output ever streams). No
+  design work is needed for either — the existing streaming bubble and existing
+  danger-toned fallback badge already cover every visible outcome these two FRs
+  produce. Confirmed by reading `useChat.ts`/`tagParser.ts`/`ChatPanel.tsx`: nothing
+  there needs a new visual state, only new backend/parsing logic (build step's job).
+- **FR-009 (`<UPDATE>` as a third tag type) is the one FR with a real design need**: a
+  "rating updated" confirmation that must be visually distinct from the existing
+  `<ADD>` "Saved" badge (`tone="success"`, green) and the fallback badge
+  (`tone="danger"`, red), per FR-005's acceptance criteria and the FR-008 precedent
+  this PRD explicitly points to. Rather than inventing a one-off component, this cycle
+  adds a fourth tone to the existing `Badge` primitive and reuses the app's own accent
+  color for it — since `Badge`'s `footnote` slot in `MessageBubble`/`ChatPanel` already
+  generically renders any tone, this makes the build step "pass `tone="update""`,
+  nothing more.
+  - `theme.css`: new `--color-accent-text: #3d5960` — a darkened slate-blue for text
+    on `--color-accent-soft` backgrounds (~5.8:1 contrast, passes WCAG AA). The
+    existing `--color-accent-contrast` (`#16171b`, near-black) is tuned for text on
+    the *solid* `--color-accent` fill (buttons, user bubble) and would read as plain
+    neutral gray-black on the pale `--color-accent-soft` fill this badge uses instead
+    — a new token was needed to keep the badge's color identity legible as "accent",
+    not just "another gray pill."
+  - `Badge.tsx` / `Badge.css`: `BadgeTone` gains `"update"` →
+    `background: var(--color-accent-soft)`, `border-color: var(--color-accent)`,
+    `color: var(--color-accent-text)`. Visually: a blue-tinted pill, distinct in hue
+    from the green "success" and red "danger" tones and from the plain-gray
+    "neutral" tone.
+  - `features/chat/types.ts`: `FootnoteInfo["tone"]` gains `"update"` so the build
+    step can set `{ tone: "update", text: "Rating updated · <title>" }` (or similar)
+    without touching `ChatPanel.tsx` — the footnote rendering path
+    (`<Badge tone={message.footnote.tone}>{message.footnote.text}</Badge>`) is
+    already generic over tone.
+- **No new components, pages, or layout changes.** `<UPDATE>`'s confirmation reuses
+  the exact same footnote slot `<ADD>`'s "Saved" badge already uses — there is no new
+  screen real estate to design, per the "extend, don't invent" brief for this step.
+- **Carried-forward flag, not newly introduced by this cycle**: FR-008 (`<RECOMMEND>`,
+  a distinct card/badge for on-request recommendations) was documented at the end of
+  Cycle 3 as never actually implemented in code (`ARCHITECTURE.md`'s own Cycle 3
+  section; `tagParser.ts`'s `createDefaultTagRegistry` still registers only `ADD` as
+  of the start of this cycle). This cycle's `change_log` entry does not list FR-008
+  among its `changes`, so per the touch-only-what's-required rule it is not
+  opportunistically built or designed here. Noting it again so it isn't silently
+  dropped a second cycle running — a future cycle's work order should explicitly
+  decide whether to reopen FR-008.

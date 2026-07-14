@@ -28,6 +28,11 @@
   --color-accent-hover: #8ba7ae;
   --color-accent-contrast: #16171b;
   --color-accent-soft: #dbe4e7;
+  /* Darkened accent for small text-on-accent-soft uses (e.g. the "update" badge,
+     Cycle 4 / FR-009) where the near-black --color-accent-contrast would read as
+     plain neutral text rather than carrying the accent hue. ~5.8:1 on
+     --color-accent-soft — passes WCAG AA for normal text. */
+  --color-accent-text: #3d5960;
 
   /* Color: semantic feedback (write confirmation / graceful failure) */
   --color-success: #15803d;
