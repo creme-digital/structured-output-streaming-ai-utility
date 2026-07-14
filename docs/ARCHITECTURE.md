@@ -219,12 +219,6 @@ written-summary deliverable and for a reviewer who only reads this file:
   compromised or buggy frontend query still cannot leak another user's rows.
   `profiles`/`items`/`chat_messages`/`parse_failures` all reference `auth.users(id)`
   directly (see "Relationships" above) rather than indirecting through `profiles.id`.
-- **Email-confirmation branch (QA fix).** The initial build's `AuthScreen` claimed
-  "Account created — signing you in..." unconditionally after a successful sign-up. QA
-  caught that Supabase omits the session on projects requiring email confirmation, which
-  would have shown a false "signing you in" message and then silently left the user on
-  the auth screen with no explanation. `AuthContext.signUp` now returns
-  `needsEmailConfirmation`, and `AuthScreen` shows the correct one of two messages.
 - **No rate limiting / usage caps.** Explicitly out of scope per the client
   ("no needed limiting" — only 2–3 testers). The build does not throttle or queue
   requests; it does rely on `try/catch` around every network call so a burst of
