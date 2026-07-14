@@ -49,11 +49,41 @@ describe("extractTags — <ADD> position independence (FR-003 AC1)", () => {
   });
 
   it("ignores unknown/unregistered tag names entirely", () => {
-    const text = 'Here is one: <UPDATE item="Inception" rating="5" /> done.';
+    // REMOVE remains deliberately unregistered/deferred (see out_of_scope) — <UPDATE>
+    // moved from "unregistered example" to "actually shipped" in Cycle 4 (FR-009), see
+    // the dedicated <UPDATE> describe block below.
+    const text = 'Here is one: <REMOVE item="Inception" /> done.';
     const { matches, malformed, cleanedText } = extractTags(text, registry);
     expect(matches).toHaveLength(0);
     expect(malformed).toHaveLength(0);
     expect(cleanedText).toBe(text);
+  });
+});
+
+describe("extractTags — <UPDATE> as a third registered tag type (Cycle 4 / FR-003 AC + FR-009)", () => {
+  const registry = createDefaultTagRegistry();
+
+  it("extracts a well-formed <UPDATE> tag alongside prose", () => {
+    const text = 'Got it, updating that one. <UPDATE item="Inception" rating="4" />';
+    const { matches, cleanedText } = extractTags(text, registry);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].tag).toBe("UPDATE");
+    expect(matches[0].attrs).toEqual({ item: "Inception", rating: 4 });
+    expect(cleanedText).toBe("Got it, updating that one. ");
+  });
+
+  it("extracts <ADD> and <UPDATE> as distinct tag types from the same response", () => {
+    const text = '<ADD item="Tenet" rating="4" /> and <UPDATE item="Inception" rating="3" />';
+    const { matches } = extractTags(text, registry);
+    expect(matches.map((m) => m.tag)).toEqual(["ADD", "UPDATE"]);
+  });
+
+  it("flags a malformed <UPDATE> (out-of-range rating) the same way as a malformed <ADD>", () => {
+    const text = '<UPDATE item="Inception" rating="9" />';
+    const { matches, malformed } = extractTags(text, registry);
+    expect(matches).toHaveLength(0);
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0].tag).toBe("UPDATE");
   });
 });
 

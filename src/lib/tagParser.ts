@@ -8,12 +8,13 @@
  * out for display, plus the structured matches.
  *
  * Architecture note: tag handling is registry-based so future tag types
- * (e.g. UPDATE, REMOVE in the eventual StealthCo product) can be added by
+ * (e.g. REMOVE in the eventual StealthCo product) can be added by
  * registering another `TagDefinition` — no changes to the extraction
- * engine itself. Only `<ADD>` is registered/active in this build
- * (see `defaultTagRegistry` below); this satisfies FR-003's requirement
- * that the architecture be "proven flexible" without shipping tag types
- * that were never requested.
+ * engine itself. `<ADD>` and `<UPDATE>` (Cycle 4 / FR-009) are registered/
+ * active in this build (see `createDefaultTagRegistry` below); `<RECOMMEND>`
+ * (FR-008) remains unimplemented — see docs/ARCHITECTURE.md. This satisfies
+ * FR-003's requirement that the architecture be "proven flexible" without
+ * shipping tag types that were never requested.
  */
 
 export interface TagMatch<T = Record<string, string>> {
@@ -144,22 +145,43 @@ export interface AddTagAttrs {
 const MIN_RATING = 1;
 const MAX_RATING = 5;
 
+function validateItemRatingAttrs(attrs: Record<string, string>): AddTagAttrs | null {
+  const item = attrs.item?.trim();
+  if (!item) return null;
+
+  const rating = Number(attrs.rating);
+  if (!Number.isFinite(rating)) return null;
+  if (rating < MIN_RATING || rating > MAX_RATING) return null;
+
+  return { item, rating };
+}
+
 export const ADD_TAG_DEFINITION: TagDefinition<AddTagAttrs> = {
   name: "ADD",
   requiredAttrs: ["item", "rating"],
-  validate: (attrs) => {
-    const item = attrs.item?.trim();
-    if (!item) return null;
-
-    const rating = Number(attrs.rating);
-    if (!Number.isFinite(rating)) return null;
-    if (rating < MIN_RATING || rating > MAX_RATING) return null;
-
-    return { item, rating };
-  },
+  validate: validateItemRatingAttrs,
 };
 
-/** The registry actually wired up in this build: only `<ADD>` is active (FR-003 scope). */
+/**
+ * `<UPDATE item="..." rating="..." />` (Cycle 4 / FR-009): re-mention of an already-logged
+ * title. Same attribute shape/validation as `<ADD>` — the difference is entirely in
+ * dispatch, not in the tag's structure: `useChat.ts` still INSERTS a new `items` row
+ * (never an overwrite, preserving rating history) but renders a distinct "rating
+ * updated" footnote instead of "Saved".
+ */
+export type UpdateTagAttrs = AddTagAttrs;
+
+export const UPDATE_TAG_DEFINITION: TagDefinition<UpdateTagAttrs> = {
+  name: "UPDATE",
+  requiredAttrs: ["item", "rating"],
+  validate: validateItemRatingAttrs,
+};
+
+/**
+ * The registry actually wired up in this build: `<ADD>` and `<UPDATE>` (FR-003 /
+ * FR-009 scope). `<RECOMMEND>` (FR-008) is documented but intentionally not built —
+ * see docs/ARCHITECTURE.md.
+ */
 export function createDefaultTagRegistry(): TagRegistry {
-  return new TagRegistry().register(ADD_TAG_DEFINITION);
+  return new TagRegistry().register(ADD_TAG_DEFINITION).register(UPDATE_TAG_DEFINITION);
 }

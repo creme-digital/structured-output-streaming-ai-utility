@@ -269,3 +269,130 @@ describe("useChat (FR-002 / FR-003 / FR-004 / FR-006)", () => {
     expect(result.current.messages).toHaveLength(0);
   });
 });
+
+describe("useChat — <UPDATE> as a third registered tag type (Cycle 4 / FR-003, FR-009)", () => {
+  it("dispatches a successful <UPDATE> to an items insert with a distinct 'rating updated' footnote", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          streamingResponse('Noted, updating that one. <UPDATE item="Inception" rating="2" />'),
+        ),
+      ),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("Actually, Inception was worse on rewatch");
+    });
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.footnote).toEqual({ tone: "update", text: "Rating updated · Inception" });
+
+    // <UPDATE> INSERTS a new row — it must never overwrite/upsert an existing one
+    // (FR-009: full rating history preserved).
+    const itemInsert = fakeSupabase.insertCalls.find((c) => c.table === "items");
+    expect(itemInsert?.payload).toMatchObject({
+      user_id: USER_ID,
+      item: "Inception",
+      rating: 2,
+      category: "movies",
+    });
+  });
+});
+
+describe("useChat — silent retry on missing tag (Cycle 4 / FR-004 Issue 1)", () => {
+  it("silently retries up to 2 additional times and keeps only the final attempt's output", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve(streamingResponse("Hmm, tell me more about that.")))
+      .mockImplementationOnce(() => Promise.resolve(streamingResponse("Still thinking it over.")))
+      .mockImplementationOnce(() =>
+        Promise.resolve(streamingResponse('Got it! <ADD item="Inception" rating="5" />')),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I loved Inception");
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.content).toBe("Got it!");
+    expect(assistantMessage.footnote).toEqual({ tone: "success", text: "Saved · Inception" });
+    // Discarded attempts must never be surfaced as failures — only the final,
+    // successful attempt is logged/visible.
+    expect(fakeSupabase.insertCalls.some((c) => c.table === "parse_failures")).toBe(false);
+  });
+
+  it("falls back and logs 'missing' exactly once after all 3 attempts produce no tag", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(streamingResponse("Sounds like a mixed reaction!")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I loved Inception");
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const missingLogs = fakeSupabase.insertCalls.filter(
+      (c) => c.table === "parse_failures" && c.payload.reason === "missing",
+    );
+    expect(missingLogs).toHaveLength(1);
+    expect(result.current.messages[1].footnote).toEqual({
+      tone: "neutral",
+      text: "Didn't catch an item to log there.",
+    });
+  });
+
+  it("does not retry when the user's message doesn't look like an opinion", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(streamingResponse("Sure, happy to chat!")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("what's up");
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useChat — unrecognized-title clarification (Cycle 4 / FR-001 Issue 2, FR-004)", () => {
+  it("logs 'unrecognized_title' and does not retry when the model asks for clarification", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        streamingResponse("I don't recognize that as a real movie — could you double-check the title?"),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I loved Freeze Frame 3000");
+    });
+
+    // Expected behavior, not a compliance miss — must NOT trigger the silent retry loop.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      fakeSupabase.insertCalls.some(
+        (c) => c.table === "parse_failures" && c.payload.reason === "unrecognized_title",
+      ),
+    ).toBe(true);
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.status).toBe("done");
+    expect(assistantMessage.footnote).toBeUndefined();
+  });
+});

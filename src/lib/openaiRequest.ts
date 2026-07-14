@@ -19,11 +19,27 @@ export interface ChatTurn {
  */
 export const OPENAI_MODEL = "gpt-4o-mini";
 
+/**
+ * Cycle 4 / FR-001 Issue 1: the dev reported clearly negative/neutral opinions
+ * ("I hated Barbie", "Marty Supreme was fine") intermittently producing NO <ADD> tag
+ * at the previous temperature (0.6) — model non-determinism, not a parser bug. The
+ * dev explicitly declined to dictate an exact number ("just pick something
+ * conservative and document it"), citing 0.2-0.3 only as an illustrative range.
+ *
+ * Chosen value: 0.2 — the low end of that range, and a standard "conservative but not
+ * fully deterministic" choice for a task that's still natural-language chat (not pure
+ * structured extraction, where 0 would be more typical). Combined with the bounded
+ * silent-retry in `useChat.ts` (FR-004), this is the two-layer fix for the
+ * intermittent-non-logging defect: fewer misses to begin with, and a safety net when
+ * one still occurs.
+ */
+export const OPENAI_TEMPERATURE = 0.2;
+
 export function buildOpenAIRequestBody(messages: ChatTurn[]) {
   return {
     model: OPENAI_MODEL,
     stream: true,
-    temperature: 0.6,
+    temperature: OPENAI_TEMPERATURE,
     messages,
   };
 }

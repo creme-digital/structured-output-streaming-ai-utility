@@ -5,6 +5,14 @@ import "./ChatPanel.css";
 
 export interface ChatPanelProps {
   userId: string;
+  /**
+   * Cycle 4 / FR-009: the signed-in user's current Supabase access token, forwarded to
+   * the edge function so it can read this user's own logged titles (RLS-scoped) for
+   * <UPDATE> fuzzy-matching. Optional — omitting it just means <UPDATE> never fires
+   * (every reply falls back to <ADD>), never a crash, so existing callers/tests that
+   * don't pass it keep working unchanged.
+   */
+  accessToken?: string;
 }
 
 /**
@@ -13,8 +21,8 @@ export interface ChatPanelProps {
  * write confirmation, and non-crashing fallback states all render through
  * this one component so an evaluator only has one screen to pressure-test.
  */
-export function ChatPanel({ userId }: ChatPanelProps) {
-  const { messages, historyStatus, sending, sendMessage } = useChat(userId);
+export function ChatPanel({ userId, accessToken }: ChatPanelProps) {
+  const { messages, historyStatus, sending, sendMessage } = useChat(userId, accessToken);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 

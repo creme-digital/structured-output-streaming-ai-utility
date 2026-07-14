@@ -6,7 +6,9 @@ import { useAuth } from "../context/AuthContext";
  * (see App.tsx), so `user` is guaranteed here.
  */
 export function Home() {
-  const { user } = useAuth();
+  const { user, session } = useAuth();
   if (!user) return null;
-  return <ChatPanel userId={user.id} />;
+  // Cycle 4 / FR-009: pass the current access token so the edge function can read this
+  // user's own logged titles (RLS-scoped) for <UPDATE> fuzzy-matching.
+  return <ChatPanel userId={user.id} accessToken={session?.access_token} />;
 }
