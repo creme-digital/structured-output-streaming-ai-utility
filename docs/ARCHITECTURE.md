@@ -156,6 +156,7 @@ isolation or integrity benefit.
 | FR-005 | Clean minimal chat UI with write confirmation | `src/features/chat/ChatPanel.tsx` (streaming caret via `MessageBubble`'s `streaming` prop, `Badge` footnote for confirmation/failure) + `src/components/ui/`, `src/components/layout/AppShell.tsx` |
 | FR-006 | Email/password auth, persisted chat, per-user isolation | `src/context/AuthContext.tsx`, `src/features/auth/AuthScreen.tsx`, RLS policies in all four `supabase/migrations/*.sql` files |
 | FR-007 | Netlify deployment + deliverables | `netlify.toml` (build command + SPA publish dir), `public/_redirects` (SPA fallback routing); the actual deploy, repo link, and written summary are produced by this pipeline's later (docs/deploy) step, not by app code |
+| FR-008 | Personalized, on-request `<RECOMMEND>` tag | **Not implemented.** `createDefaultTagRegistry()` (`src/lib/tagParser.ts`) registers only `ADD_TAG_DEFINITION`; there is no `RECOMMEND` tag definition, no system-prompt clause conditioning its emission, and no distinct-card rendering anywhere in `src/`. See "Assumptions & decisions → Cycle 3" below. |
 
 ## Test coverage as built
 
@@ -230,3 +231,41 @@ written-summary deliverable and for a reviewer who only reads this file:
   `TagDefinition` in `tagParser.ts`) so a future `UPDATE`/`REMOVE` tag type is a new
   registration, not a rewrite of the extraction engine — this is the concrete answer to
   FR-003's "architecture proven flexible" requirement.
+
+### Cycle 3 (PRD v4 — recolor re-affirmation)
+
+- **v2 and v3 change_log entries had never actually been built before this cycle.**
+  This cycle's work order frames the `#A0B9BF` recolor as an idempotent re-run of v2
+  ("that change already shipped in v2 ... byte-identical to the v2 outcome"). That
+  premise didn't hold: prior to this cycle, git history showed only a single
+  design/build/qa/docs pass (PRD v1), and `src/styles/theme.css` still carried the
+  original purple accent (`#4338ca`). Neither the v2 recolor nor the v3 `<RECOMMEND>`
+  feature (FR-008) had been implemented. This was recorded as a soft, non-blocking
+  finding (see `DESIGN.md`'s own Cycle 3 section and QA blocker
+  `a197956b-710d-4acd-80d6-aae4da153668`) rather than treated as a hard stop, since
+  FR-005's target color and scope were unambiguous enough to proceed.
+- **This cycle's actual scope was recolor-only, per the touch-only-what's-required
+  rule.** The work order's own `changes` array names only `FR-005`, and its summary
+  states "no other FR is affected." So this cycle applied the `#A0B9BF` recolor
+  (`src/styles/theme.css` — `--color-accent`, `--color-accent-hover`,
+  `--color-accent-contrast`, `--color-accent-soft`; see `DESIGN.md` for the exact
+  before/after values and the contrast-fix rationale) and left FR-008 unbuilt rather
+  than opportunistically building a feature the work order didn't ask for this cycle.
+  A dark `--color-accent-contrast` (`#16171b`, not white) was chosen deliberately:
+  white-on-`#A0B9BF` measures ~2:1 (fails WCAG AA), dark-on-`#A0B9BF` measures ~8.7:1,
+  and the PRD explicitly warns against "white-on-light-blue illegibility."
+- **FR-008 (`<RECOMMEND>`) remains unimplemented and is documented here rather than
+  silently dropped.** No `RECOMMEND` tag definition, system-prompt clause, or
+  distinct-card UI exists in `src/` (confirmed by grep and code review across both the
+  build and QA steps of this cycle). Building it was out of this cycle's scope per the
+  work order's own framing, so it was not added opportunistically; a dev decision is
+  needed on whether a future cycle should explicitly re-open FR-008 to actually ship it.
+  This is flagged for the human dev, not silently absorbed into "done."
+- **No purple remains anywhere in the shipped CSS.** Every component stylesheet
+  references the accent via `var(--color-accent...)` rather than a hardcoded hex, so
+  the four-token change in `theme.css` is a complete, single-source recolor; confirmed
+  in this cycle's QA pass by grepping hex values out of the built `dist/assets/*.css`.
+- **No schema, RLS, or app-behavior change this cycle**, consistent with the work
+  order's own migration notes ("no data migration required... this is a re-run of the
+  v2 recolor"). All production data (`profiles`, `items`, `chat_messages`,
+  `parse_failures`) is untouched; no new migration file was added.
