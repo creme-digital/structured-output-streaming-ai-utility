@@ -59,8 +59,9 @@ first real deploy; `.env.local.example` documents the two Vite ones for local de
 ```
 src/
   lib/             pure, framework-free modules: systemPrompt, tagParser, sseParser,
-                    openaiRequest, opinionHeuristic, supabaseClient — the parts that are
-                    unit-tested without a browser or network
+                    openaiRequest, opinionHeuristic, titleClarificationHeuristic,
+                    supabaseClient — the parts that are unit-tested without a browser
+                    or network
   context/          AuthContext (Supabase session state)
   features/auth/    sign-up / sign-in screen
   features/chat/    useChat hook (streaming + parsing + persistence) + ChatPanel UI
@@ -72,10 +73,42 @@ supabase/migrations/             schema + RLS policies, in apply order
 docs/ARCHITECTURE.md             data model, auth model, FR map, assumptions & decisions
 ```
 
-## Current status (Cycle 3 / PRD v4)
+## Current status (Cycle 4 / PRD v5)
 
 The theme's primary accent is `#A0B9BF` (soft slate blue) applied uniformly across
 buttons, message bubbles, badges, links/focus rings, and the auth screen (`src/styles/theme.css`).
-The PRD's v3 addition — a second, on-request `<RECOMMEND>` tag (FR-008) — is **not yet
-implemented** in this codebase; see "Assumptions & decisions → Cycle 3" in
-`docs/ARCHITECTURE.md` for why and how it was flagged.
+
+This cycle fixed two correctness defects and shipped one new tag type:
+
+- **Lower, documented temperature.** The OpenAI call now runs at `temperature: 0.2`
+  (`src/lib/openaiRequest.ts`, `OPENAI_TEMPERATURE`) — down from 0.6 — to reduce
+  intermittent non-logging of clearly negative/neutral opinions.
+- **Bounded silent retry.** When the user's message reads like a loggable opinion
+  (`opinionHeuristic.ts`) but a full attempt streams back with no `<ADD>`/`<UPDATE>`
+  tag, `useChat.ts` silently retries the OpenAI call up to 2 more times (3 attempts
+  total), discarding every failed attempt — the user only ever sees the final
+  attempt's output. If all 3 attempts fail, the existing fallback + `parse_failures`
+  log (`reason: "missing"`) still applies.
+- **Ask instead of guessing on unrecognized titles.** The system prompt
+  (`src/lib/systemPrompt.ts`) now instructs the model to ask for clarification,
+  model-knowledge-only (no TMDb/external lookup), rather than emit a tag for a title
+  it doesn't recognize as real. Those clarifications are logged to `parse_failures`
+  with `reason: "unrecognized_title"` (expected behavior, logged for visibility, not
+  a genuine failure) — recognized by `src/lib/titleClarificationHeuristic.ts`.
+- **`<UPDATE>` — a third registered tag type (FR-009).** On re-mention of an
+  already-logged title, the model emits `<UPDATE item="..." rating="..." />` instead
+  of a fresh `<ADD>` (model-side fuzzy title matching — the edge function passes the
+  user's own previously-logged titles to the model). The parser dispatches `<UPDATE>`
+  to a handler that **inserts a new `items` row** (never overwrites), preserving full
+  rating history per title, and the UI shows a distinct "Rating updated · `<title>`"
+  badge (`tone="update"`) next to the existing "Saved · `<title>`" confirmation.
+
+No schema changes beyond widening the `parse_failures.reason` check constraint
+(`supabase/migrations/005_parse_failures_unrecognized_title_reason.sql`) to allow the
+new `unrecognized_title` value.
+
+The PRD's v3 addition — a second, on-request `<RECOMMEND>` tag (FR-008) — remains
+**not implemented** in this codebase; it was not in this cycle's change_log scope
+(FR-001/003/004/009 only), so per the touch-only-what's-required rule it was carried
+forward rather than opportunistically built. See "Assumptions & decisions → Cycle 3"
+and "→ Cycle 4" in `docs/ARCHITECTURE.md`.
