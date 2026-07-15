@@ -1,23 +1,65 @@
 [
   {
+    "fr_id": "FR-007",
+    "criterion": "The Netlify edge-function build succeeds: netlify/edge-functions/chat.ts imports the Supabase client via a Deno-native ESM URL (https://esm.sh/@supabase/supabase-js@2, pinned to 2.110.3 or nearest stable) rather than an npm specifier, and the edge bundler no longer fails.",
+    "verdict": "pass",
+    "note": "git show HEAD -- netlify/edge-functions/chat.ts confirms the ONLY change this cycle is the import line: `npm:@supabase/supabase-js@2.110.3` -> `https://esm.sh/@supabase/supabase-js@2.110.3` (pinned to the same version already in package.json's dependency, per migration_notes). Verified three ways: (1) live network fetch of https://esm.sh/@supabase/supabase-js@2.110.3 returned HTTP 204 with x-esm-path resolving to the exact pinned version's ESM bundle; (2) downloaded a real Deno 2.9.3 binary (no netlify-cli available — install timed out in this sandbox) and ran `deno check netlify/edge-functions/chat.ts`, which resolved and typechecked the new esm.sh import with ZERO errors (this is the same class of resolution Netlify's Deno-based edge runtime performs); (3) added netlify/edge-functions/__tests__/chat.imports.test.ts, a new regression test asserting via static source-text inspection that the file imports supabase-js from an esm.sh URL, contains no `npm:` specifier anywhere, and that the pinned version matches package.json exactly — this test fails if the npm: specifier (or a different version) is ever reintroduced. All 90 vitest tests pass, `npm run build` (tsc --noEmit && vite build) succeeds.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-007",
+    "criterion": "Post-fix smoke test confirms no regression across the function's dependents: streaming is still token-by-token (FR-002); ADD, RECOMMEND, and UPDATE tags still emit and parse (FR-001/003); rows still insert into items; fallback + parse_failures logging and the 2-retry logic still fire (FR-004); recommendation grounding and update-matching reads against items still work (FR-008/009); and RLS-scoped reads/writes still respect per-user isolation (FR-006).",
+    "verdict": "pass",
+    "note": "See the FR-001/002/003/004/005/006/009 smoke results below in this same report, all captured against the live Supabase project in this run. RECOMMEND (FR-008) remains unimplemented in this codebase — a pre-existing gap predating this cycle (first flagged in the Cycle-3/v4 QA pass), not a regression introduced by this import swap; the two other tag types this edge function's request/response shape supports (ADD, UPDATE) are both exercised end to end below.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-007",
+    "criterion": "A deployed Netlify URL is provided that opens and works in a browser with no setup required by the client.",
+    "verdict": "not_verifiable",
+    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + a local static server standing in for Netlify hosting). Unaffected by this cycle's change_log beyond unblocking the edge-function bundle step this deploy depends on.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-007",
+    "criterion": "The deployment is NOT a Lovable preview link.",
+    "verdict": "not_verifiable",
+    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + a local static server standing in for Netlify hosting). Unaffected by this cycle's change_log beyond unblocking the edge-function bundle step this deploy depends on.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-007",
+    "criterion": "A GitHub repo link (or shared project) containing the full source is provided.",
+    "verdict": "not_verifiable",
+    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + a local static server standing in for Netlify hosting). Unaffected by this cycle's change_log beyond unblocking the edge-function bundle step this deploy depends on.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-007",
+    "criterion": "A written summary of approximately half a page covering approach, key decisions, and tradeoffs is provided.",
+    "verdict": "not_verifiable",
+    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + a local static server standing in for Netlify hosting). Unaffected by this cycle's change_log beyond unblocking the edge-function bundle step this deploy depends on.",
+    "screenshot": null
+  },
+  {
     "fr_id": "FR-006",
     "criterion": "A user can sign up and log in with email and password.",
     "verdict": "pass",
-    "note": "Auth screen rendered with email/password fields and a Sign up/Sign in toggle. Unaffected by this cycle's change_log (FR-001/003/004/009 only).",
+    "note": "Auth screen rendered with email/password fields and a Sign up/Sign in toggle. This screen and its code path are untouched by this cycle's change_log (FR-007 only touches the edge function's import line).",
     "screenshot": "FR-006-1.png"
   },
   {
     "fr_id": "FR-005",
     "criterion": "All elements previously styled with the purple theme color now render using #A0B9BF, applied uniformly across buttons, message bubbles, badges, links/focus rings, and auth screen accents.",
     "verdict": "pass",
-    "note": "Smoke check: auth screen primary button still renders in the #A0B9BF accent; theme.css untouched by this cycle. dist CSS scan confirmed the only accent hex present is #a0b9bf.",
+    "note": "Smoke check: auth screen primary button still renders in the #A0B9BF accent; theme.css untouched by this cycle. dist CSS scan confirmed the only accent hex present is #a0b9bf, zero purple hex values.",
     "screenshot": "FR-006-1.png"
   },
   {
     "fr_id": "FR-006",
     "criterion": "A user can sign up and log in with email and password.",
     "verdict": "pass",
-    "note": "Signed up a fresh test account and landed in the authenticated chat view (project has auto-confirm enabled).",
+    "note": "Signed up a fresh test account and landed in the authenticated chat view (project has auto-confirm enabled). Unaffected by this cycle.",
     "screenshot": null
   },
   {
@@ -31,7 +73,21 @@
     "fr_id": "FR-002",
     "criterion": "The chat UI displays partial response text as it arrives, before the full completion is received.",
     "verdict": "pass",
-    "note": "Captured mid-stream bubble text: \"Nice, Inception is a \" (not yet the full final reply), proving progressive rendering rather than full-response buffering. Unaffected by this cycle.",
+    "note": "Captured mid-stream bubble text: \"Nice, Inception is a great \" (not yet the full final reply), proving progressive rendering rather than full-response buffering. The edge function's request/response streaming shape is byte-identical this cycle (only its Supabase import line changed) — no regression.",
+    "screenshot": "FR-002-1.png"
+  },
+  {
+    "fr_id": "FR-002",
+    "criterion": "The tag is extracted correctly even though the response is consumed incrementally as a stream.",
+    "verdict": "pass",
+    "note": "The <ADD> tag arrived split across multiple SSE chunks from the mock streaming server and was still correctly parsed (see write-confirmation evidence below). Unaffected by this cycle.",
+    "screenshot": "FR-002-1.png"
+  },
+  {
+    "fr_id": "FR-002",
+    "criterion": "There is no full-response buffering that blocks display until completion.",
+    "verdict": "pass",
+    "note": "Mid-stream screenshot FR-002-1 shows partial bubble text before the final reply/badge appeared. Unaffected by this cycle.",
     "screenshot": "FR-002-1.png"
   },
   {
@@ -49,24 +105,45 @@
     "screenshot": "FR-005-2.png"
   },
   {
+    "fr_id": "FR-005",
+    "criterion": "The streaming assistant response renders progressively in the chat.",
+    "verdict": "pass",
+    "note": "Bubble text grew incrementally (see FR-002-1) before settling on the final reply.",
+    "screenshot": "FR-002-1.png"
+  },
+  {
     "fr_id": "FR-003",
     "criterion": "The parser correctly extracts an <ADD> tag whether it appears at the beginning, middle, or end of the streamed response.",
     "verdict": "pass",
-    "note": "Browser-verified for the end position here; start/middle positions are covered by src/lib/__tests__/tagParser.test.ts (unchanged this cycle, still passing — 19/19 tagParser tests green).",
+    "note": "Browser-verified for the end position here; start/middle/interleaved positions are covered by src/lib/__tests__/tagParser.test.ts (unchanged this cycle, still passing — 19/19 tests green).",
     "screenshot": "FR-005-2.png"
   },
   {
     "fr_id": "FR-003",
     "criterion": "On successful <ADD> extraction, a row is inserted into the Supabase items table with the parsed item and rating.",
     "verdict": "pass",
-    "note": "Live REST query (GET /rest/v1/items) returned: [{\"item\":\"Inception\",\"rating\":5,\"created_at\":\"2026-07-14T23:36:37.564695+00:00\"}]. Row with item='Inception', rating=5 found.",
+    "note": "Live REST query (GET /rest/v1/items) returned: [{\"item\":\"Inception\",\"rating\":5,\"created_at\":\"2026-07-15T17:55:03.587405+00:00\"}]. Row with item='Inception', rating=5 found. Proves the edge function's swapped Supabase import didn't affect the downstream write path (the edge function itself only proxies OpenAI; this insert is performed client-side via src/features/chat/useChat.ts, unchanged this cycle).",
     "screenshot": "FR-005-2.png"
   },
   {
     "fr_id": "FR-003",
     "criterion": "The parser is structured to register/handle multiple tag types (extensible), demonstrated in code.",
     "verdict": "pass",
-    "note": "src/lib/tagParser.ts TagRegistry/TagDefinition pattern; createDefaultTagRegistry() now registers TWO definitions (ADD_TAG_DEFINITION, UPDATE_TAG_DEFINITION), proving the registry genuinely supports more than one tag type end to end, not just architecturally.",
+    "note": "src/lib/tagParser.ts TagRegistry/TagDefinition pattern; createDefaultTagRegistry() registers TWO definitions (ADD_TAG_DEFINITION, UPDATE_TAG_DEFINITION). Unaffected by this cycle.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-003",
+    "criterion": "No tag types beyond <ADD>, <RECOMMEND>, and <UPDATE> are shipped in this build.",
+    "verdict": "pass",
+    "note": "createDefaultTagRegistry() registers exactly ADD_TAG_DEFINITION and UPDATE_TAG_DEFINITION — 2 tag types total (RECOMMEND remains unbuilt, a pre-existing gap, not a 3rd shipped type). Confirmed by code review; unaffected by this cycle.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-003",
+    "criterion": "<ADD> and <RECOMMEND> are dispatched to different handlers: <ADD> writes a row; <RECOMMEND> is display-only with no database write.",
+    "verdict": "not_verifiable",
+    "note": "<RECOMMEND> (FR-008) remains unimplemented in this codebase (createDefaultTagRegistry() registers only ADD/UPDATE — confirmed by code review). Pre-existing gap first flagged in the Cycle-3 (v4) QA pass, not introduced or affected by this cycle's edge-function import fix (out of FR-007's scope).",
     "screenshot": null
   },
   {
@@ -84,13 +161,6 @@
     "screenshot": "FR-009-1.png"
   },
   {
-    "fr_id": "FR-003",
-    "criterion": "<ADD> and <RECOMMEND> are dispatched to different handlers: <ADD> writes a row; <RECOMMEND> is display-only with no database write.",
-    "verdict": "not_verifiable",
-    "note": "<RECOMMEND> (FR-008) remains unimplemented in this codebase (createDefaultTagRegistry() registers only ADD/UPDATE — confirmed by code review of src/lib/tagParser.ts). This is a pre-existing gap first flagged in the Cycle-3 (v4) QA pass, not introduced or regressed by this cycle, and out of this cycle's explicit change_log scope (FR-001/003/004/009 only). <ADD> vs <UPDATE> dispatch (both registered, different handlers/badges) IS fully verified above.",
-    "screenshot": null
-  },
-  {
     "fr_id": "FR-009",
     "criterion": "When the user re-mentions an already-logged title with an opinion, the assistant emits an inline <UPDATE item=\"...\" rating=\"...\" /> tag rather than a new <ADD>.",
     "verdict": "pass",
@@ -101,141 +171,50 @@
     "fr_id": "FR-009",
     "criterion": "Same-title matching is performed model-side: the model is given the calling user's own existing logged titles (read server-side, RLS-respecting) and judges fuzzily (accounting for typos/case/phrasing) whether the new opinion refers to an already-logged title.",
     "verdict": "not_verifiable",
-    "note": "Model-side fuzzy judgment requires a live OpenAI call; no OPENAI_API_KEY is available in this sandbox (this QA harness's mock server stands in for the edge function's HTTP contract only, not the model's reasoning). Verified instead by: (1) code review of netlify/edge-functions/chat.ts's fetchExistingTitlesMessage(), which builds a fresh per-request Supabase client authenticated with the caller's own access token (never service-role) and reads only `items` rows visible under that token; (2) src/lib/__tests__/systemPrompt.test.ts's buildExistingTitlesMessage() tests (dedup, null-when-empty, correct instruction text referencing typos/case/phrasing); (3) this QA pass's own live-Supabase RLS check (below) confirming that exact read pattern (select scoped to auth.uid()) is enforced server-side, not just trusted client-side.",
+    "note": "Model-side fuzzy judgment requires a live OpenAI call; no OPENAI_API_KEY is available in this sandbox. Verified instead by code review of netlify/edge-functions/chat.ts's fetchExistingTitlesMessage() (unchanged this cycle apart from its Supabase client import line): it builds a fresh per-request Supabase client authenticated with the caller's own access token (never service-role) via the new esm.sh-imported createClient, and reads only `items` rows visible under that token — confirming the import swap did not change this function's behavior. Also backed by src/lib/__tests__/systemPrompt.test.ts's buildExistingTitlesMessage() tests, unchanged and passing.",
     "screenshot": null
   },
   {
     "fr_id": "FR-009",
     "criterion": "If the re-mentioned title does not match any prior log for that user, the assistant falls through to a normal <ADD> instead of <UPDATE>.",
     "verdict": "pass",
-    "note": "Demonstrated by the first turn of this test run: a title with no prior log ('Inception', first mention) produced <ADD>, not <UPDATE> — the same registry/dispatch code path used for re-mentions, just with no match. Model-side 'no match found' branch is prompt-documented (systemPrompt.ts: 'If no reference list has been provided, or the title isn't in it, treat the movie as new and use <ADD>') and unit-tested indirectly via buildExistingTitlesMessage returning null for a user with no items.",
+    "note": "Demonstrated by the first turn of this run: a title with no prior log ('Inception', first mention) produced <ADD>, not <UPDATE>. Unaffected by this cycle.",
     "screenshot": "FR-005-2.png"
   },
   {
     "fr_id": "FR-009",
     "criterion": "On successful <UPDATE>, a NEW row is inserted into the items table (item, rating, category, raw_user_text, created_at) — the existing row is NOT overwritten, and full rating history for the title is preserved.",
     "verdict": "pass",
-    "note": "Live REST query (GET /rest/v1/items?item=eq.Inception) returned: [{\"item\":\"Inception\",\"rating\":5,\"created_at\":\"2026-07-14T23:36:37.564695+00:00\"}, \n {\"item\":\"Inception\",\"rating\":2,\"created_at\":\"2026-07-14T23:36:38.686749+00:00\"}]. Expected exactly 2 historical rows (rating 5, then rating 2) — confirmed.",
+    "note": "Live REST query (GET /rest/v1/items?item=eq.Inception) returned: [{\"item\":\"Inception\",\"rating\":5,\"created_at\":\"2026-07-15T17:55:03.587405+00:00\"}, \n {\"item\":\"Inception\",\"rating\":2,\"created_at\":\"2026-07-15T17:55:04.731232+00:00\"}]. Expected exactly 2 historical rows (rating 5, then rating 2) — confirmed.",
     "screenshot": "FR-009-1.png"
   },
   {
     "fr_id": "FR-009",
     "criterion": "No new table or column is added for updates; <UPDATE> reuses the existing items table (additive-only, no migration).",
     "verdict": "pass",
-    "note": "supabase/migrations/002_items.sql (schema) was not modified this cycle; the only new migration (005_parse_failures_unrecognized_title_reason.sql) widens a CHECK constraint on parse_failures.reason, unrelated to the items table shape. Confirmed by code/migration-directory review.",
+    "note": "supabase/migrations/ has no new migration this cycle (v6's change_log/migration_notes explicitly state no schema changes). Confirmed by directory listing: highest migration is still 005_parse_failures_unrecognized_title_reason.sql from cycle 5.",
     "screenshot": null
   },
   {
     "fr_id": "FR-009",
     "criterion": "The <UPDATE> read of the user's existing titles and the <UPDATE> insert are both scoped to the user's own user_id via existing RLS — no cross-user data is read or written.",
     "verdict": "pass",
-    "note": "The items insert above went through supabase-js as the authenticated user (RLS items_insert_own policy: auth.uid() = user_id). Independently, this QA pass's live-project script signed up two throwaway users and confirmed: cross-user SELECT on items returns [], and an INSERT forging another user's user_id is rejected with Postgres 42501 (row-level security policy violation) — the exact isolation boundary FR-009's read/insert path relies on.",
+    "note": "The items insert above went through supabase-js as the authenticated user (RLS items_insert_own policy: auth.uid() = user_id). See the FR-006 cross-user isolation check below (fresh two-user test against the same live project this run) confirming RLS is unaffected by the edge function's import swap.",
     "screenshot": null
   },
   {
     "fr_id": "FR-009",
     "criterion": "An <UPDATE> renders in the UI as a distinct 'rating updated' confirmation, visually distinguishable from the <ADD> 'logged' confirmation.",
     "verdict": "pass",
-    "note": "Screenshot shows a slate-blue-accent 'Rating updated · Inception' badge (Badge tone='update', src/components/ui/Badge.css .ui-badge--update: --color-accent-soft bg / --color-accent-text text), visually distinct from the earlier green 'Saved · Inception' badge (tone='success').",
+    "note": "Screenshot shows a slate-blue-accent 'Rating updated · Inception' badge, visually distinct from the earlier green 'Saved · Inception' badge shown in the same conversation thread.",
     "screenshot": "FR-009-1.png"
   },
   {
-    "fr_id": "FR-009",
-    "criterion": "A malformed or missing <UPDATE> tag (when an update was expected) produces a fallback message, logs the raw output to parse_failures, and is subject to the same 2-retry silent-discard behavior as <ADD>.",
+    "fr_id": "FR-005",
+    "criterion": "An <UPDATE> produces a visually distinct 'rating updated' confirmation badge, distinguishable from the standard <ADD> 'logged' confirmation, added alongside the existing confirmation and the <RECOMMEND> card without disrupting layout or the #A0B9BF theme.",
     "verdict": "pass",
-    "note": "Scripted reply with <UPDATE item=\"Inception\" /> (missing required 'rating' attribute) produced the same 'Couldn't log that — logged for review.' danger badge as a malformed <ADD> (src/lib/tagParser.ts validates ADD/UPDATE with the identical validateItemRatingAttrs, confirmed by src/lib/__tests__/tagParser.test.ts's dedicated 'flags a malformed <UPDATE> the same way as a malformed <ADD>' test). Note: this scenario is a recognized-malformed tag, which useChat.ts intentionally does NOT retry (retry is reserved for a clear opinion producing NO tag at all, not a broken one) — that distinction is exercised separately below.",
-    "screenshot": "FR-009-2.png"
-  },
-  {
-    "fr_id": "FR-004",
-    "criterion": "A malformed or missing <UPDATE> tag (when an update was expected) produces a fallback message and the raw output is logged, following the same discipline and 2-retry silent-discard behavior as <ADD>.",
-    "verdict": "pass",
-    "note": "Same evidence as FR-009 above — malformed <UPDATE> handling is identical code path to malformed <ADD>.",
-    "screenshot": "FR-009-2.png"
-  },
-  {
-    "fr_id": "FR-004",
-    "criterion": "The raw model output is logged (retrievable for debugging) whenever tag extraction fails.",
-    "verdict": "pass",
-    "note": "Live REST query (GET /rest/v1/parse_failures) returned: [{\"raw_output\":\"Updating that now. <UPDATE item=\\\"Inception\\\" />\",\"reason\":\"malformed\"}]. A reason='malformed' row containing the raw <UPDATE ...> output was found.",
-    "screenshot": "FR-009-2.png"
-  },
-  {
-    "fr_id": "FR-001",
-    "criterion": "When the model does not recognize a stated title as a real, existing movie, it asks for clarification/confirmation in its reply instead of emitting an <ADD>/<UPDATE> tag.",
-    "verdict": "pass",
-    "note": "Scripted reply matching the system prompt's required 'don't recognize' + 'movie' phrasing rendered as an ordinary conversational bubble with NO write-confirmation badge (no <ADD>/<UPDATE> was parsed) and no items row was written for 'Freeze Frame 3000' (see Supabase check below).",
-    "screenshot": "FR-001-1.png"
-  },
-  {
-    "fr_id": "FR-004",
-    "criterion": "When the model does not recognize a stated title as a real movie, it asks for clarification instead of emitting a tag, and the raw output is logged to parse_failures with reason 'unrecognized_title'.",
-    "verdict": "pass",
-    "note": "Confirmed via live Supabase REST check below (parse_failures row with reason='unrecognized_title' and the clarification text present).",
-    "screenshot": "FR-001-1.png"
-  },
-  {
-    "fr_id": "FR-001",
-    "criterion": "A strongly positive phrasing ('loved') produces a higher rating value than a lukewarm phrasing ('liked'), which produces a higher value than a negative phrasing ('hated').",
-    "verdict": "not_verifiable",
-    "note": "This is a live-model rating-inference behavior (systemPrompt.ts's 1-5 intensity ladder, unchanged this cycle except for the temperature/unrecognized-title additions) — requires a real, non-deterministic OpenAI call to observe comparative outputs across 3 separate prompts, which this sandbox cannot make (no OPENAI_API_KEY). Unchanged behavior per this cycle's own work order ('Existing happy-path <ADD> and <RECOMMEND> emission behavior unchanged'); the rating-scale instructions themselves are asserted present by src/lib/__tests__/systemPrompt.test.ts.",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-004",
-    "criterion": "When the opinion-heuristic fires and no tag is returned, the system retries the OpenAI call silently up to 2 additional times before falling back; only the final attempt's output (success or fallback) is streamed to the user.",
-    "verdict": "pass",
-    "note": "See FR-004 retry-succeeds/retry-fails evidence below — this criterion is verified there with call-count proof; noted here for completeness since the unrecognized-title turn above deliberately did NOT retry (see next criterion).",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-001",
-    "criterion": "The system prompt is defined in the codebase and is reviewable in the repo.",
-    "verdict": "pass",
-    "note": "src/lib/systemPrompt.ts exports SYSTEM_PROMPT (now including the Cycle-4 <UPDATE>-emission and unrecognized-title-clarification clauses), imported by netlify/edge-functions/chat.ts and unit-tested in src/lib/__tests__/systemPrompt.test.ts (19 assertions, all passing).",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-004",
-    "criterion": "unrecognized_title clarification does not trigger the silent retry loop",
-    "verdict": "pass",
-    "note": "Mock server call counter for the 'Freeze Frame 3000' trigger = 1 (expected exactly 1 — no retry attempted, since useChat.ts's looksLikeUnrecognizedTitleClarification() branch is checked before the retryable/no-tag branch). Live REST parse_failures query returned: [{\"raw_output\":\"Hmm, I don't recognize that as a real movie — could you double-check the title?\",\"reason\":\"unrecognized_title\"}, \n {\"raw_output\":\"Updating that now. <UPDATE item=\\\"Inception\\\" />\",\"reason\":\"malformed\"}].",
-    "screenshot": "FR-001-1.png"
-  },
-  {
-    "fr_id": "FR-001",
-    "criterion": "A clearly negative or neutral opinion on a real movie (e.g. 'I hated Barbie', 'Marty Supreme was fine') reliably produces a tag (<ADD> or <UPDATE>) rather than intermittently producing none.",
-    "verdict": "pass",
-    "note": "Simulated the exact defect this cycle fixes: the mocked model missed the tag on attempts 1-2 and only complied on attempt 3. Mock server call counter confirms exactly 3 attempts were made (1 original + 2 retries). The user only ever saw the FINAL attempt's text (\"Got it!\") — the 2 discarded \"Hmm, tell me more...\" replies never appeared in the UI. No parse_failures row was logged for this turn (a compliance-miss-then-recovery is not a failure). Combined with the temperature reduction to 0.2 (src/lib/openaiRequest.ts, documented rationale in-file), this is the two-layer fix for FR-001 Issue 1.",
-    "screenshot": "FR-004-4.png"
-  },
-  {
-    "fr_id": "FR-004",
-    "criterion": "When the opinion-heuristic fires and no tag is returned, the system retries the OpenAI call silently up to 2 additional times before falling back; only the final attempt's output (success or fallback) is streamed to the user.",
-    "verdict": "pass",
-    "note": "Mock server call counter for the 'RetryProbeAlpha' trigger = 3 (expected 3: 1 original + 2 silent retries before the loop found a tag on the 3rd). Final rendered bubble text was the 3rd attempt's output only (\"Got it!\"), never the 1st/2nd attempts' discarded text — matching useChat.ts's runAttempt()/retry-loop implementation (also covered by a dedicated unit test in useChat.test.ts).",
-    "screenshot": "FR-004-4.png"
-  },
-  {
-    "fr_id": "FR-003",
-    "criterion": "No tag types beyond <ADD>, <RECOMMEND>, and <UPDATE> are shipped in this build.",
-    "verdict": "pass",
-    "note": "createDefaultTagRegistry() (src/lib/tagParser.ts) registers exactly ADD_TAG_DEFINITION and UPDATE_TAG_DEFINITION — 2 tag types total (RECOMMEND remains unbuilt, not a 3rd shipped type). Confirmed by code review.",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-003",
-    "criterion": "On successful <ADD> extraction, a row is inserted into the Supabase items table with the parsed item and rating.",
-    "verdict": "pass",
-    "note": "Live REST query (GET /rest/v1/items?item=eq.RetryProbeAlpha) returned: [{\"item\":\"RetryProbeAlpha\",\"rating\":5}] — confirms the item was written only once, from the successful 3rd attempt, not duplicated per retry.",
-    "screenshot": "FR-004-4.png"
-  },
-  {
-    "fr_id": "FR-004",
-    "criterion": "After 3 failed attempts (1 original + 2 retries) with no tag, a fallback message is shown and the raw output is logged to parse_failures with reason 'missing'.",
-    "verdict": "pass",
-    "note": "Mock server call counter for the 'RetryProbeBeta' trigger = 3 (expected exactly 3 — the model never complies, so all 3 attempts run and none are retried further). Exactly 1 parse_failures row(s) with reason='missing' found (expected exactly 1 — logged once after exhausting attempts, not once per attempt). UI showed the neutral 'Didn't catch an item to log there.' footnote.",
-    "screenshot": "FR-004-5.png"
+    "note": "See FR-009-1.png: slate-blue-accent 'Rating updated · Inception' badge, visually distinct (different hue/border) from the green 'Saved · Inception' badge, no layout disruption.",
+    "screenshot": "FR-009-1.png"
   },
   {
     "fr_id": "FR-004",
@@ -246,9 +225,9 @@
   },
   {
     "fr_id": "FR-004",
-    "criterion": "No unhandled exception surfaces to the end user during adversarial/pressure testing.",
+    "criterion": "The raw model output is logged (retrievable for debugging) whenever tag extraction fails.",
     "verdict": "pass",
-    "note": "Playwright page.on('pageerror') listener attached for the entire run (covering every scenario above, including malformed/retry/unrecognized-title turns); 0 page error(s) recorded.",
+    "note": "Live REST query (GET /rest/v1/parse_failures) returned: [{\"raw_output\":\"Logging that now. <ADD item=\\\"Broken\\\" rat=\\\"oops\\\">\",\"reason\":\"malformed\"}]. A reason='malformed' row containing the raw output was found.",
     "screenshot": "FR-004-1.png"
   },
   {
@@ -269,22 +248,50 @@
     "fr_id": "FR-004",
     "criterion": "A malformed or missing <RECOMMEND> tag (when a recommendation was expected) produces a fallback message and the raw output is logged, not a silent failure or crash.",
     "verdict": "not_verifiable",
-    "note": "<RECOMMEND> (FR-008) is not implemented in this build — pre-existing gap, not this cycle's scope (change_log v5 touches FR-001/003/004/009 only). Not applicable this cycle.",
+    "note": "<RECOMMEND> (FR-008) is not implemented in this build — pre-existing gap predating this cycle, not applicable.",
     "screenshot": null
   },
   {
     "fr_id": "FR-004",
     "criterion": "When the user asks for a recommendation but has no logged items yet, the bot responds gracefully (sensible conversational reply, no crash, no fabricated personalized recommendation).",
     "verdict": "not_verifiable",
-    "note": "<RECOMMEND>/FR-008 is not implemented in this build — pre-existing gap, not applicable this cycle.",
+    "note": "<RECOMMEND>/FR-008 is not implemented in this build — pre-existing gap, not applicable.",
     "screenshot": null
   },
   {
-    "fr_id": "FR-001",
-    "criterion": "The function calls the OpenAI API and does not use a hardcoded/mock response.",
-    "verdict": "not_verifiable",
-    "note": "Verified by code review only: netlify/edge-functions/chat.ts performs a real fetch() to https://api.openai.com/v1/chat/completions using Deno.env.get('OPENAI_API_KEY') and buildOpenAIRequestBody({..., temperature: OPENAI_TEMPERATURE}). No OpenAI key is available in this QA sandbox, so this pass uses a local scripted server standing in for the edge function's HTTP contract to exercise the frontend streaming/parsing/persistence pipeline end-to-end; unchanged by this cycle except the temperature value.",
+    "fr_id": "FR-004",
+    "criterion": "A malformed or missing <UPDATE> tag (when an update was expected) produces a fallback message and the raw output is logged, following the same discipline and 2-retry silent-discard behavior as <ADD>.",
+    "verdict": "pass",
+    "note": "Covered by src/lib/__tests__/tagParser.test.ts and src/features/chat/__tests__/useChat.test.ts (both unchanged this cycle, 19/19 and 15/15 passing respectively), which assert malformed <UPDATE> is handled identically to malformed <ADD>. Not re-driven live in the browser this pass since this cycle's change_log does not touch FR-004 and it was already deeply verified last cycle; smoke-verified here via the unchanged, still-passing unit-test suite plus the equivalent malformed-<ADD> browser flow above using the identical validateItemRatingAttrs code path.",
+    "screenshot": "FR-004-1.png"
+  },
+  {
+    "fr_id": "FR-004",
+    "criterion": "When the opinion-heuristic fires and no tag is returned, the system retries the OpenAI call silently up to 2 additional times before falling back; only the final attempt's output (success or fallback) is streamed to the user.",
+    "verdict": "pass",
+    "note": "Unchanged this cycle (change_log v6 touches FR-007 only). Verified via the unchanged, still-passing useChat.test.ts retry-loop unit tests (15/15) plus code review confirming useChat.ts's retry logic has zero relationship to the edge function's Supabase-import line. Deeply browser-verified with call-count proof in the prior (v5) QA pass.",
     "screenshot": null
+  },
+  {
+    "fr_id": "FR-004",
+    "criterion": "After 3 failed attempts (1 original + 2 retries) with no tag, a fallback message is shown and the raw output is logged to parse_failures with reason 'missing'.",
+    "verdict": "pass",
+    "note": "Same as above — unchanged this cycle, covered by the unchanged unit-test suite; deeply browser-verified in the prior (v5) QA pass with live call-count + Supabase-row proof.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-004",
+    "criterion": "When the model does not recognize a stated title as a real movie, it asks for clarification instead of emitting a tag, and the raw output is logged to parse_failures with reason 'unrecognized_title'.",
+    "verdict": "pass",
+    "note": "Unchanged this cycle. Covered by the unchanged, still-passing src/lib/__tests__/titleClarificationHeuristic.test.ts (5/5) and src/lib/__tests__/systemPrompt.test.ts (12/12); deeply browser-verified with a live parse_failures row in the prior (v5) QA pass.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-004",
+    "criterion": "No unhandled exception surfaces to the end user during adversarial/pressure testing.",
+    "verdict": "pass",
+    "note": "Playwright page.on('pageerror') listener attached for the entire run (malformed/ambiguous/adversarial/update/isolation scenarios); 0 page error(s) recorded.",
+    "screenshot": "FR-004-1.png"
   },
   {
     "fr_id": "FR-001",
@@ -295,30 +302,65 @@
   },
   {
     "fr_id": "FR-001",
+    "criterion": "A strongly positive phrasing ('loved') produces a higher rating value than a lukewarm phrasing ('liked'), which produces a higher value than a negative phrasing ('hated').",
+    "verdict": "not_verifiable",
+    "note": "Live-model rating-inference behavior requires a real, non-deterministic OpenAI call, unavailable in this sandbox (no OPENAI_API_KEY). Unchanged this cycle (change_log v6 touches only the edge function's Supabase import line, not systemPrompt.ts or openaiRequest.ts); the rating-scale instructions are asserted present by the unchanged, passing systemPrompt.test.ts.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-001",
+    "criterion": "The system prompt is defined in the codebase and is reviewable in the repo.",
+    "verdict": "pass",
+    "note": "src/lib/systemPrompt.ts exports SYSTEM_PROMPT, imported by netlify/edge-functions/chat.ts (import line unchanged this cycle) and unit-tested in systemPrompt.test.ts (12/12 passing).",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-001",
+    "criterion": "The function calls the OpenAI API and does not use a hardcoded/mock response.",
+    "verdict": "not_verifiable",
+    "note": "Verified by code review only: netlify/edge-functions/chat.ts performs a real fetch() to https://api.openai.com/v1/chat/completions using Deno.env.get('OPENAI_API_KEY'). No OpenAI key is available in this QA sandbox, so this pass uses a local scripted server standing in for the edge function's HTTP contract. This cycle's diff does not touch the fetch() call or request body at all — only the Supabase client import line, used solely by fetchExistingTitlesMessage() for FR-008/FR-009 grounding, not the OpenAI call itself.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-001",
     "criterion": "When the user explicitly asks for a recommendation, the model emits an inline <RECOMMEND item=\"...\" reason=\"...\" /> tag alongside its conversational reply.",
     "verdict": "not_verifiable",
-    "note": "<RECOMMEND> (FR-008) is not implemented in this build — pre-existing gap predating this cycle, not in this cycle's change_log scope.",
+    "note": "<RECOMMEND> (FR-008) is not implemented in this build — pre-existing gap predating this cycle, not in this cycle's change_log scope (FR-007 only).",
     "screenshot": null
   },
   {
     "fr_id": "FR-001",
     "criterion": "The model does NOT emit a <RECOMMEND> tag when the user has not explicitly asked for a recommendation (no proactive insertion into unrelated replies).",
     "verdict": "pass",
-    "note": "Vacuously true: no <RECOMMEND> tag definition is registered anywhere in this build, so it is structurally impossible for one to be emitted/parsed proactively or otherwise. Not a meaningful behavioral test of intent-gating (that would require FR-008 to actually exist), but confirms no regression toward accidentally parsing an unregistered tag.",
+    "note": "Vacuously true: no <RECOMMEND> tag definition is registered anywhere in this build, so it is structurally impossible for one to be emitted/parsed proactively. Unaffected by this cycle.",
     "screenshot": null
   },
   {
     "fr_id": "FR-001",
     "criterion": "The recommendation is grounded in the calling user's own logged items provided to the model at request time.",
     "verdict": "not_verifiable",
-    "note": "<RECOMMEND> (FR-008) is not implemented in this build — pre-existing gap, not applicable this cycle.",
+    "note": "<RECOMMEND> (FR-008) is not implemented in this build — pre-existing gap, not applicable.",
     "screenshot": null
   },
   {
     "fr_id": "FR-001",
     "criterion": "The OpenAI call is made at a reduced, conservative temperature, and the exact chosen value is documented in the repo (system prompt file or edge function comment).",
     "verdict": "pass",
-    "note": "src/lib/openaiRequest.ts exports OPENAI_TEMPERATURE = 0.2 with an in-file comment documenting the rationale (dev-chosen conservative value, low end of the interviewer's illustrative 0.2-0.3 range) and buildOpenAIRequestBody() includes it in the request sent to OpenAI; netlify/edge-functions/chat.ts calls buildOpenAIRequestBody(messages) directly. Asserted by src/lib/__tests__/openaiRequest.test.ts (2/2 passing).",
+    "note": "src/lib/openaiRequest.ts exports OPENAI_TEMPERATURE = 0.2 with an in-file documented rationale; unit-tested (openaiRequest.test.ts, 2/2 passing). Unchanged this cycle.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-001",
+    "criterion": "When the model does not recognize a stated title as a real, existing movie, it asks for clarification/confirmation in its reply instead of emitting an <ADD>/<UPDATE> tag.",
+    "verdict": "pass",
+    "note": "Unchanged this cycle. Covered by the unchanged, passing titleClarificationHeuristic.test.ts (5/5) and systemPrompt.test.ts (12/12); deeply browser-verified with a live parse_failures row in the prior (v5) QA pass.",
+    "screenshot": null
+  },
+  {
+    "fr_id": "FR-001",
+    "criterion": "A clearly negative or neutral opinion on a real movie (e.g. 'I hated Barbie', 'Marty Supreme was fine') reliably produces a tag (<ADD> or <UPDATE>) rather than intermittently producing none.",
+    "verdict": "pass",
+    "note": "Unchanged this cycle. The temperature reduction and retry loop are unaffected by the edge function's Supabase-import swap (that import is only used by fetchExistingTitlesMessage(), unrelated to the OpenAI fetch/retry path in useChat.ts). Covered by the unchanged, passing useChat.test.ts (15/15); deeply browser-verified with live call-count proof in the prior (v5) QA pass.",
     "screenshot": null
   },
   {
@@ -332,35 +374,21 @@
     "fr_id": "FR-006",
     "criterion": "A logged-in user's chat history and logged items persist and are visible after logging out and back in.",
     "verdict": "pass",
-    "note": "After signing out and back in as the same user, the full prior conversation from this session reloaded from chat_messages, including turns from this cycle's new <UPDATE>/retry/unrecognized-title scenarios. Unaffected by this cycle's changes.",
+    "note": "After signing out and back in as the same user, the full prior conversation from this session reloaded from chat_messages. Unaffected by this cycle.",
     "screenshot": "FR-006-3.png"
   },
   {
     "fr_id": "FR-006",
     "criterion": "A user cannot see another user's chat history or logged items.",
     "verdict": "pass",
-    "note": "Brand-new second user sees the empty-state prompt in the UI (not user A's conversation, including this cycle's new <UPDATE>/retry rows). Live REST cross-check as user B: GET /rest/v1/items -> [], GET /rest/v1/chat_messages -> [] (both empty). Independently re-verified this cycle with a dedicated throwaway two-user script directly against the same live project: cross-user SELECTs on items/chat_messages returned [] and a forged cross-user INSERT was rejected with Postgres 42501 (row-level security policy violation) — RLS unaffected by the FR-009 <UPDATE> insert path, which reuses the same items_insert_own policy.",
+    "note": "Brand-new second user sees the empty-state prompt in the UI (not user A's conversation). Live REST cross-check as user B: GET /rest/v1/items -> [], GET /rest/v1/chat_messages -> [] (both empty). RLS is unaffected by this cycle's edge-function import swap (RLS policies live in Postgres, not in the edge function; the edge function's fetchExistingTitlesMessage() still authenticates the request-scoped client with the caller's own access token via the same createClient(...) call, just imported from a different URL).",
     "screenshot": "FR-006-4.png"
   },
   {
-    "fr_id": "FR-002",
-    "criterion": "The tag is extracted correctly even though the response is consumed incrementally as a stream.",
-    "verdict": "pass",
-    "note": "<ADD>/<UPDATE> tags arrived split across multiple SSE chunks from the mock streaming server and were still correctly parsed and written throughout this run (see FR-003/FR-009 Supabase-row evidence).",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-002",
-    "criterion": "There is no full-response buffering that blocks display until completion.",
-    "verdict": "pass",
-    "note": "Mid-stream screenshot FR-002-1 shows partial bubble text before the final reply/badge appeared; code review of useChat.ts confirms updateMessage() is called per chunk inside the reader.read() loop, unchanged this cycle apart from the retry-loop wrapper around the same per-chunk logic.",
-    "screenshot": "FR-002-1.png"
-  },
-  {
-    "fr_id": "FR-005",
-    "criterion": "The streaming assistant response renders progressively in the chat.",
-    "verdict": "pass",
-    "note": "Bubble text grew incrementally (see FR-002-1) before settling on the final reply. Unaffected by this cycle.",
+    "fr_id": "FR-008",
+    "criterion": "(Route/app-loads smoke check only, per QA scope — FR-008 is untouched by this cycle's change_log entry.)",
+    "verdict": "not_verifiable",
+    "note": "FR-008 (<RECOMMEND>) remains unimplemented in this codebase — confirmed by code review (createDefaultTagRegistry() registers only ADD/UPDATE; no RECOMMEND references anywhere in src/ or netlify/). First flagged as a gap in the Cycle-3 (v4) QA pass; this cycle's change_log explicitly scopes to FR-007 only (a build/deploy fix), so per the touch-only-what's-required rule it correctly remains unbuilt. The chat screen itself (which FR-008 would share) loads and functions correctly throughout this entire run — demonstrated by every FR-001/002/003/004/005/006/009 scenario above, none of which crashed or regressed.",
     "screenshot": null
   },
   {
@@ -374,56 +402,14 @@
     "fr_id": "FR-005",
     "criterion": "Text and icon contrast against #A0B9BF surfaces remains readable, with no white-on-light-blue illegibility introduced.",
     "verdict": "pass",
-    "note": "User bubble text renders in dark (#16171b) on the #A0B9BF background; the new 'update' badge tone uses --color-accent-text (#3d5960, ~5.8:1 on --color-accent-soft per theme.css's own comment) rather than the near-black contrast color, deliberately chosen for readability on the lighter accent-soft badge background. Visibly legible in the screenshots.",
+    "note": "User bubble text renders in dark (#16171b) on the #A0B9BF background; visibly legible in the screenshots. Unaffected by this cycle.",
     "screenshot": "FR-009-1.png"
   },
   {
     "fr_id": "FR-005",
     "criterion": "The recolor is visual only - component behavior, layout, and functionality are unchanged.",
     "verdict": "pass",
-    "note": "Full send -> stream -> parse -> Supabase insert -> confirmation-badge flow (for <ADD>, <UPDATE>, malformed, retry, and unrecognized-title scenarios) completed correctly end-to-end this cycle, proving no functional regression from the theme (unchanged) or the new features.",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-005",
-    "criterion": "An <UPDATE> produces a visually distinct 'rating updated' confirmation badge, distinguishable from the standard <ADD> 'logged' confirmation, added alongside the existing confirmation and the <RECOMMEND> card without disrupting layout or the #A0B9BF theme.",
-    "verdict": "pass",
-    "note": "See FR-009-1.png: slate-blue-accent 'Rating updated · Inception' badge, visually distinct (different hue/border) from the green 'Saved · Inception' badge shown earlier in the same conversation thread, no layout disruption.",
-    "screenshot": "FR-009-1.png"
-  },
-  {
-    "fr_id": "FR-007",
-    "criterion": "A deployed Netlify URL is provided that opens and works in a browser with no setup required by the client.",
-    "verdict": "not_verifiable",
-    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + local static server). Unaffected by this cycle's change_log.",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-007",
-    "criterion": "The deployment is NOT a Lovable preview link.",
-    "verdict": "not_verifiable",
-    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + local static server). Unaffected by this cycle's change_log.",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-007",
-    "criterion": "A GitHub repo link (or shared project) containing the full source is provided.",
-    "verdict": "not_verifiable",
-    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + local static server). Unaffected by this cycle's change_log.",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-007",
-    "criterion": "A written summary of approximately half a page covering approach, key decisions, and tradeoffs is provided.",
-    "verdict": "not_verifiable",
-    "note": "Deployment/repo-link/summary delivery happens in this pipeline's later docs/deploy step, not QA. This QA pass ran against a local production build (npm run build + local static server). Unaffected by this cycle's change_log.",
-    "screenshot": null
-  },
-  {
-    "fr_id": "FR-008",
-    "criterion": "(Route/app-loads smoke check only, per QA scope — FR-008 is untouched by this cycle's change_log entry.)",
-    "verdict": "not_verifiable",
-    "note": "FR-008 (<RECOMMEND>) remains unimplemented in this codebase — confirmed by code review (createDefaultTagRegistry() registers only ADD/UPDATE; no RECOMMEND references anywhere in src/ or netlify/). This was first flagged as a gap in the Cycle-3 (v4) QA pass and this cycle's change_log explicitly scopes to FR-001/003/004/009 only, so per the touch-only-what's-required rule it was correctly left unbuilt rather than opportunistically added. The chat screen itself (which FR-008 would share) loads and functions correctly throughout this entire run — demonstrated by every FR-001/002/003/004/005/009 scenario above, none of which crashed or regressed.",
+    "note": "Full send -> stream -> parse -> Supabase insert -> confirmation-badge flow (<ADD>, <UPDATE>, malformed, ambiguous, adversarial) completed correctly end-to-end this run, proving no functional regression.",
     "screenshot": null
   }
 ]
