@@ -33,3 +33,9 @@
   color: var(--color-accent-text);
   border-color: var(--color-accent);
 }
+
+.ui-badge--watchlist {
+  background: var(--color-watchlist-bg);
+  color: var(--color-watchlist);
+  border-color: var(--color-watchlist-border);
+}

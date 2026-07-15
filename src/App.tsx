@@ -9,6 +9,10 @@ function AppContent() {
 
   return (
     <AppShell
+      // Cycle 6 / FR-010: widen the content column only once the chat + history
+      // panel layout (Home) is what's rendering — the auth screen keeps the
+      // original, narrower single-column width.
+      wide={Boolean(session && user)}
       headerRight={
         session && user ? (
           <>

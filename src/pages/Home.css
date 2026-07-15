@@ -1,0 +1,36 @@
+/* Cycle 6 / FR-010: chat panel + live history panel side by side. */
+
+.home-layout {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-5);
+  width: 100%;
+}
+
+.home-layout > .chat-panel {
+  flex: 1;
+  min-width: 0;
+}
+
+.home-layout > .history-panel {
+  width: var(--history-panel-width);
+  flex-shrink: 0;
+}
+
+/* Below this width, two side-by-side panels get too cramped — stack instead,
+   history panel below chat with its own fixed viewing height. */
+@media (max-width: 860px) {
+  .home-layout {
+    flex-direction: column;
+  }
+
+  .home-layout > .chat-panel,
+  .home-layout > .history-panel {
+    width: 100%;
+  }
+
+  .home-layout > .history-panel {
+    height: 360px;
+    min-height: 360px;
+  }
+}

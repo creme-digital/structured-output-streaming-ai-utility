@@ -18,3 +18,6 @@ export type { BadgeProps, BadgeTone } from "./Badge";
 
 export { MessageBubble } from "./MessageBubble";
 export type { MessageBubbleProps, MessageRole } from "./MessageBubble";
+
+export { Tabs } from "./Tabs";
+export type { TabsProps, TabItem } from "./Tabs";

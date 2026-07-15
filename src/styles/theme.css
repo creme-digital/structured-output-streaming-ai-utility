@@ -43,6 +43,14 @@
   --color-danger-bg: #fceeed;
   --color-danger-border: #f2c9c6;
 
+  /* Color: want-to-watch marker (Cycle 6 / FR-005). Amber — deliberately a fourth
+     distinct hue alongside success (green), danger (red), and update (accent-blue)
+     so a watchlist entry is never confused with a rated/logged item or a rating
+     update at a glance, in chat write-confirmations and the history panel (FR-010). */
+  --color-watchlist: #92400e;
+  --color-watchlist-bg: #fdf2e3;
+  --color-watchlist-border: #f0d5a8;
+
   /* Color: chat bubbles */
   --color-bubble-assistant-bg: var(--color-surface-sunken);
   --color-bubble-assistant-text: var(--color-text);
@@ -96,4 +104,9 @@
   /* Layout */
   --content-max-width: 720px;
   --header-height: 56px;
+  /* Cycle 6 / FR-010: the authenticated chat screen now shares space with a live
+     history panel on the right, so it opts into a wider content column
+     (AppShell's `wide` prop) than the single chat box / auth screen use. */
+  --content-max-width-wide: 1040px;
+  --history-panel-width: 320px;
 }

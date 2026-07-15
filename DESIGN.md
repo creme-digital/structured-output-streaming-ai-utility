@@ -214,3 +214,64 @@ pre-existing `src/` tree — this cycle touches no file under `src/`, `index.htm
 byte-identical. The actual import-line swap in `netlify/edge-functions/chat.ts` is the
 build step's job (it's outside `tsc`/`vite`'s compilation graph — Netlify's edge
 bundler builds it separately at deploy time).
+
+## Cycle 6 (PRD v7 — `<UPDATE>` bug fix, want-to-watch, live history panel)
+
+Unlike Cycles 2-5, this work order has real design content: FR-005 needs a fifth,
+distinct visual marker (want-to-watch), and FR-010 is a brand-new screen surface (a
+live history panel). FR-001/FR-003/FR-004/FR-009's changes (the action-integrity guard,
+the extended opinion-heuristic, `<ADD>`'s optional `status` attribute, the
+want-to-watch→watched `<UPDATE>` transition) are prompt/parsing/logic-only — confirmed
+by reading `useChat.ts`, `tagParser.ts`, `systemPrompt.ts`, `opinionHeuristic.ts`: none
+of these introduce a new *visible* state beyond the one badge already covered below, so
+no design work was needed for them beyond that badge.
+
+**What changed:**
+
+- **`theme.css`** — two token additions, no edits to existing tokens:
+  - `--color-watchlist` / `-bg` / `-border`: a fourth semantic hue (amber,
+    `#92400e` on `#fdf2e3`) alongside success (green), danger (red), and update
+    (accent-blue), so a want-to-watch entry is never confused with a rated log at a
+    glance — the dev directly confirmed want-to-watch entries need their own distinct
+    marker (FR-005).
+  - `--content-max-width-wide` (1040px) and `--history-panel-width` (320px): layout
+    tokens for the new chat + history two-column screen (FR-010). The original
+    `--content-max-width` (720px, single chat box) is untouched and still governs the
+    header and the auth screen.
+- **`Badge`** — new `tone="watchlist"` (amber pill), alongside the existing
+  neutral/success/danger/update tones. `FootnoteInfo`'s tone union
+  (`features/chat/types.ts`) gains `"watchlist"` so the build step can set
+  `{ tone: "watchlist", text: "Want to watch · <title>" }` on a successful
+  want-to-watch `<ADD>`, through the same generic footnote-badge slot every other
+  write-confirmation already uses — no `ChatPanel.tsx` changes needed.
+- **New primitive `Tabs`** (`src/components/ui/Tabs.tsx`/`.css`) — a small accessible
+  tablist (`role="tablist"`/`"tab"`, arrow-key navigation), generic and reusable, not
+  history-panel-specific. Exported from `components/ui/index.ts`.
+- **New feature `HistoryPanel`** (`src/features/history/HistoryPanel.tsx`/`.css`/
+  `types.ts`) — the FR-010 panel: `Tabs` for "Rated" / "Want to Watch", a scrollable
+  list of `HistoryEntry` rows (item, rating-or-watchlist-badge, timestamp), and the same
+  loading/error/empty state pattern `ChatPanel` already established. Renders every row
+  it's given, uncollapsed — no dedup/merge logic lives here, matching the PRD's explicit
+  requirement that multiple `<UPDATE>` rows per title stay visible as separate entries.
+  **Presentational only**, same split as Cycle 1's placeholder `Home`: it takes
+  `ratedItems` / `watchlistItems` / `status` as props and owns no Supabase client, no
+  query, no realtime subscription. That wiring (the `items` read + realtime
+  subscription on INSERT events, both RLS-scoped to the logged-in user) is explicitly
+  the build step's job — this step doesn't touch the database or any data-fetching
+  hook.
+- **Layout**: `AppShell` gains an optional `wide` prop that swaps
+  `.app-shell__content`'s max-width to `--content-max-width-wide`, applied only via
+  `App.tsx` when the authenticated `Home` screen is rendering (`wide={Boolean(session
+  && user)}`) — the auth screen never opts in and is visually unchanged. `Home.tsx` now
+  renders `.home-layout` (`Home.css`, new): `ChatPanel` (flex: 1) beside `HistoryPanel`
+  (fixed `--history-panel-width`), stacking vertically under 860px so the two-panel
+  layout doesn't get crushed on narrow viewports. `Home` currently passes
+  `HistoryPanel` empty placeholder data (`status="loading"`) pending the build step's
+  real data hook — matching the dev's own description of the feature ("a log on the
+  right of the chat with a rated and want to watch tab").
+- **No changes** to `AuthScreen`, `ChatPanel`'s internals, `MessageBubble`, `Button`,
+  `Input`, `Card`, `Spinner`, or any existing token value — this cycle only adds.
+
+Verified `npm run build` (`tsc --noEmit && vite build`) exits 0, and the full existing
+`vitest` suite (90 tests, unchanged) still passes against these additions — nothing in
+this cycle altered behavior any existing test asserts on.
