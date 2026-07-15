@@ -193,3 +193,24 @@ Reading the amendments against what design actually owns:
   opportunistically built or designed here. Noting it again so it isn't silently
   dropped a second cycle running — a future cycle's work order should explicitly
   decide whether to reopen FR-008.
+
+## Cycle 5 (PRD v6 — Netlify edge-function build/deploy fix)
+
+**No design changes.** This cycle's work order (change_log v6, FR-007 only) swaps the
+Supabase client import in `netlify/edge-functions/chat.ts` from an npm specifier
+(`npm:@supabase/supabase-js@2.110.3`) to a Deno-native ESM import
+(`https://esm.sh/@supabase/supabase-js@2.110.3`), to unblock Netlify's edge bundler.
+Confirmed by reading the file: it's pure Deno runtime glue (env vars, the OpenAI
+`fetch` passthrough, and a best-effort RLS-scoped read of the user's own item titles
+for FR-009's `<UPDATE>` matching) with zero UI surface — no component, page, badge, or
+theme token is implicated. The PRD's own migration_notes and acceptance criteria frame
+this explicitly as build/deploy-only with "no behavior, streaming shape, tag
+emission/parsing, or DB writes change," which matches: nothing here is a design-system
+concern.
+
+Verified `npm run build` (`tsc --noEmit && vite build`) still exits 0 against the
+pre-existing `src/` tree — this cycle touches no file under `src/`, `index.html`, or
+`package.json`, so the app skeleton, primitives, and theme from Cycles 1-4 are
+byte-identical. The actual import-line swap in `netlify/edge-functions/chat.ts` is the
+build step's job (it's outside `tsc`/`vite`'s compilation graph — Netlify's edge
+bundler builds it separately at deploy time).
