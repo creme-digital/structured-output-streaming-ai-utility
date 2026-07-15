@@ -49,14 +49,16 @@ back per-user isolation and give the schema a natural home for future profile fi
 page or settings UI was in scope).
 
 ### `items`
-One row per successfully-parsed `<ADD>` **or `<UPDATE>`** tag (Cycle 4 / FR-009). Written
-by `useChat.sendMessage` after a stream finishes and `extractTags` returns at least one
-match — `<UPDATE>` uses the exact same `insert` call as `<ADD>`, never an `update`/`upsert`,
-so re-mentioning a title deliberately produces a **second, later-`created_at` row** for
-that `(user_id, item)` pair rather than overwriting the first. A user's `items` rows are
-therefore no longer guaranteed one-per-title: **the "current" rating for a title is the
-latest `created_at` row for that title**, and any downstream reader must not assume
-uniqueness.
+One row per logged title. `<ADD>` inserts; since Cycle 8, `<UPDATE>` performs a **true
+in-place update** of the existing row for that title (found case-insensitively; falls
+back to an insert if the model emitted `<UPDATE>` for a never-logged title). This
+supersedes Cycles 4–7's deliberate insert-per-`<UPDATE>` design ("full uncollapsed
+rating history", "the current rating is the latest row"): the dev explicitly reversed
+that decision after seeing duplicate entries live. `008_items_true_update.sql` added
+the previously-missing `items_update_own` RLS policy and deduped the historical
+duplicates (keeping the newest row per `(user_id, category, lower(item))`). Uniqueness
+is maintained by app logic + the model's titles reference list, not by a DB unique
+index — a rare duplicate `<ADD>` is preferable to a hard insert failure mid-chat.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -703,3 +705,37 @@ against the live site by replaying the affected user's exact persisted history t
 - **Everything else untouched** — no changes to the edge function, `items` schema, RLS,
   tag parser, or any FR-002/FR-006/FR-007/FR-008 behavior; `parse_failures.reason`
   reuses `missing` for watchlist misses rather than widening the check constraint.
+
+### Cycle 8 (dev-directed: `<UPDATE>` is a true in-place update)
+
+Requested by the dev after verifying the Cycle 7 fixes live: "I want the update to be a
+true update rather than a new log" (their Rated tab showed two "Norbit" rows after a
+re-rating). This deliberately reverses Cycle 4's insert-per-`<UPDATE>` / full-rating-
+history design.
+
+- **Write path** (`useChat.ts`): an `<UPDATE>` match now looks up the user's most recent
+  `items` row for that title (exact reference-list spelling via case-insensitive match,
+  ilike wildcards escaped) and updates `rating`, `status` (always to `"watched"` — this
+  also makes the want-to-watch → watched transition an in-place flip of the same row),
+  and `raw_user_text`. If no row exists — the model claimed an update for a never-logged
+  title — it falls back to the old insert so the rating is never dropped.
+- **RLS**: `items` had select/insert/delete policies but no UPDATE policy (the client
+  never updated before), so `008_items_true_update.sql` adds `items_update_own`;
+  without it the new code would silently match zero rows.
+- **One-time dedupe** in the same migration: keep the newest row per
+  `(user_id, category, lower(item))`, delete older duplicates produced by the old
+  behavior. Verified against production immediately before applying: exactly one row
+  (the older "Norbit") was removed.
+- **Live history panel** (`useHistory.ts`): the realtime subscription now also listens
+  for `UPDATE` events (channel renamed `items-changes-<userId>`) and replaces the
+  matching entry in place — including moving a want-to-watch entry to the Rated tab
+  when its row's status flips. The `supabase_realtime` publication already carried
+  UPDATE events for `items`; only the client handler was missing.
+- **No DB unique index** on the title triple: `<ADD>`-vs-`<UPDATE>` routing remains the
+  model's job via the titles reference list, and a rare duplicate `<ADD>` (e.g. a
+  session without an access token) is preferable to a hard constraint violation
+  surfacing mid-chat as a failed save.
+- **Test infrastructure**: `mockSupabase.ts` gained `update(...).eq(...)` recording
+  (`updateCalls`), `ilike`, a chainable `order().limit()`, per-table read rows
+  (`rowsForTable`), and per-event realtime handlers so INSERT and UPDATE registrations
+  don't clobber each other.

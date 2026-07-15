@@ -391,35 +391,73 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
             let footnote: FootnoteInfo | undefined;
 
             if (itemMatches.length > 0) {
-              const insertResults = await Promise.all(
-                itemMatches.map((match) => {
-                  if (match.tag === "ADD") {
-                    const attrs = match.attrs as unknown as AddTagAttrs;
-                    return supabase.from("items").insert({
-                      user_id: userId,
-                      item: attrs.item,
-                      rating: attrs.rating,
-                      category: "movies",
-                      raw_user_text: trimmed,
-                      status: attrs.status,
-                    });
-                  }
-                  // <UPDATE> (Cycle 4 / FR-009): always a fresh, real opinion — including
-                  // the want-to-watch -> watched transition (Cycle 6 / FR-009) — so it
-                  // always inserts with status "watched", never "want_to_watch".
-                  const attrs = match.attrs as unknown as UpdateTagAttrs;
+              /**
+               * Cycle 8 (dev-directed): <UPDATE> is now a TRUE in-place update, not a
+               * fresh insert — the dev explicitly reversed Cycle 4's keep-every-row
+               * design after seeing duplicate entries live ("I want the update to be a
+               * true update rather than a new log"). `008_items_true_update.sql` adds
+               * the RLS update policy and deduped the rows the old behavior produced.
+               *
+               * The target row is found by title, case-insensitively (the model is
+               * told to reuse the reference-list spelling verbatim, but ilike keeps a
+               * stray case difference from silently missing; wildcards are escaped so
+               * a title containing % or _ still matches literally). The want-to-watch
+               * -> watched transition (Cycle 6 / FR-009) now flips that same row's
+               * status and fills in its rating. If no row exists at all — the model
+               * emitted <UPDATE> for a never-logged title — fall back to the old
+               * insert so the user's rating is never dropped on the floor.
+               */
+              async function applyItemMatch(
+                match: (typeof itemMatches)[number],
+              ): Promise<{ error: { message: string } | null }> {
+                if (match.tag === "ADD") {
+                  const attrs = match.attrs as unknown as AddTagAttrs;
                   return supabase.from("items").insert({
                     user_id: userId,
                     item: attrs.item,
                     rating: attrs.rating,
                     category: "movies",
                     raw_user_text: trimmed,
-                    status: "watched",
+                    status: attrs.status,
                   });
-                }),
-              );
+                }
 
-              const failedInsert = insertResults.find((r) => r.error);
+                const attrs = match.attrs as unknown as UpdateTagAttrs;
+                const escapedTitle = attrs.item.replace(/([\\%_])/g, "\\$1");
+                const { data: existingRows, error: findError } = await supabase
+                  .from("items")
+                  .select("id")
+                  .eq("user_id", userId)
+                  .ilike("item", escapedTitle)
+                  .order("created_at", { ascending: false })
+                  .limit(1);
+
+                const existingId =
+                  !findError && existingRows && existingRows.length > 0
+                    ? (existingRows[0] as { id: string }).id
+                    : null;
+
+                if (existingId) {
+                  return supabase
+                    .from("items")
+                    .update({ rating: attrs.rating, status: "watched", raw_user_text: trimmed })
+                    .eq("id", existingId)
+                    .eq("user_id", userId);
+                }
+
+                return supabase.from("items").insert({
+                  user_id: userId,
+                  item: attrs.item,
+                  rating: attrs.rating,
+                  category: "movies",
+                  raw_user_text: trimmed,
+                  status: "watched",
+                });
+              }
+
+              const writeResults = await Promise.all(itemMatches.map(applyItemMatch));
+
+              const failedInsert = writeResults.find((r) => r.error);
 
               if (failedInsert) {
                 await logParseFailure(outcome.rawBuffer, "other");

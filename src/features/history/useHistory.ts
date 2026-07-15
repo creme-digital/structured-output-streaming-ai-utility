@@ -29,9 +29,12 @@ export interface UseHistoryResult {
 /**
  * FR-010: the live history panel's data source — an initial RLS-scoped read of the
  * signed-in user's own `items` rows, kept live via a Supabase realtime subscription on
- * `items` INSERT events. Every historical row is kept (never deduped/merged): multiple
- * `<UPDATE>` entries for the same title stay visible as separate rows, per the PRD's
- * explicit "full uncollapsed rating history" requirement.
+ * `items` INSERT and UPDATE events.
+ *
+ * Cycle 8 (dev-directed): `<UPDATE>` now modifies its row in place (see
+ * `008_items_true_update.sql` and `useChat.ts`), superseding the PRD's original "full
+ * uncollapsed rating history" requirement — each title is one row, so the UPDATE
+ * branch of the subscription replaces the matching entry rather than appending.
  *
  * Isolation: both the initial read and the realtime subscription are scoped to this
  * user's own `user_id` — the `.eq(...)`/`filter` here are a defense-in-depth/noise
@@ -69,7 +72,7 @@ export function useHistory(userId: string): UseHistoryResult {
     void loadInitial();
 
     const channel = supabase
-      .channel(`items-inserts-${userId}`)
+      .channel(`items-changes-${userId}`)
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "items", filter: `user_id=eq.${userId}` },
@@ -80,6 +83,23 @@ export function useHistory(userId: string): UseHistoryResult {
             // Guard against a double-add if the realtime event and the initial load race.
             if (prev.some((entry) => entry.id === incoming.id)) return prev;
             return [incoming, ...prev];
+          });
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "items", filter: `user_id=eq.${userId}` },
+        (payload: { new: ItemRow }) => {
+          if (cancelled) return;
+          const incoming = rowToEntry(payload.new);
+          setEntries((prev) => {
+            const index = prev.findIndex((entry) => entry.id === incoming.id);
+            // A row updated before the initial load landed (or that raced past it)
+            // just gets added — same guard philosophy as the INSERT branch above.
+            if (index === -1) return [incoming, ...prev];
+            const next = [...prev];
+            next[index] = incoming;
+            return next;
           });
         },
       )

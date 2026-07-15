@@ -49,11 +49,21 @@ describe("App auth gating (FR-006)", () => {
     // effect-firing order isn't something this test should depend on — keyed on table
     // name instead of "the first call" so this only ever exercises the chat-history
     // failure path, regardless of which effect happens to run first.
+    const errorResult = Object.assign(Promise.resolve({ data: null, error: { message: "down" } }), {
+      limit: () => Promise.resolve({ data: null, error: { message: "down" } }),
+    });
     const errorBuilder = {
       select: () => errorBuilder,
       eq: () => errorBuilder,
-      order: () => Promise.resolve({ data: null, error: { message: "down" } }),
+      ilike: () => errorBuilder,
+      order: () => errorResult,
       insert: () => Promise.resolve({ data: null, error: null }),
+      update: () => {
+        const chain = Object.assign(Promise.resolve({ data: null, error: null }), {
+          eq: (): typeof chain => chain,
+        });
+        return chain;
+      },
     };
     const originalImpl = tables.from.getMockImplementation()!;
     tables.from.mockImplementation((table: string) => (table === "chat_messages" ? errorBuilder : originalImpl(table)));

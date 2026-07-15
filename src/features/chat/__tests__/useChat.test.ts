@@ -270,8 +270,13 @@ describe("useChat (FR-002 / FR-003 / FR-004 / FR-006)", () => {
   });
 });
 
-describe("useChat — <UPDATE> as a third registered tag type (Cycle 4 / FR-003, FR-009)", () => {
-  it("dispatches a successful <UPDATE> to an items insert with a distinct 'rating updated' footnote", async () => {
+describe("useChat — <UPDATE> as a third registered tag type (Cycle 4 / FR-003, FR-009; true in-place update since Cycle 8)", () => {
+  it("dispatches a successful <UPDATE> to an in-place items UPDATE of the existing row, with a distinct 'rating updated' footnote", async () => {
+    fakeSupabase = createFakeSupabaseTables({
+      rowsForTable: {
+        items: [{ id: "existing-row-1", item: "Inception", rating: 5, status: "watched" }],
+      },
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
@@ -291,14 +296,39 @@ describe("useChat — <UPDATE> as a third registered tag type (Cycle 4 / FR-003,
     const assistantMessage = result.current.messages[1];
     expect(assistantMessage.footnote).toEqual({ tone: "update", text: "Rating updated · Inception" });
 
-    // <UPDATE> INSERTS a new row — it must never overwrite/upsert an existing one
-    // (FR-009: full rating history preserved).
+    // Cycle 8: <UPDATE> modifies the existing row in place — one row per title, never
+    // a second "log" (the dev explicitly reversed Cycle 4's keep-every-row design).
+    const itemUpdate = fakeSupabase.updateCalls.find((c) => c.table === "items");
+    expect(itemUpdate?.payload).toMatchObject({ rating: 2, status: "watched" });
+    expect(itemUpdate?.filters).toMatchObject({ id: "existing-row-1", user_id: USER_ID });
+    expect(fakeSupabase.insertCalls.some((c) => c.table === "items")).toBe(false);
+  });
+
+  it("falls back to an insert when <UPDATE> targets a title with no existing row", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(streamingResponse('Updating that! <UPDATE item="Inception" rating="2" />')),
+      ),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("Actually, Inception was worse on rewatch");
+    });
+
+    // The model claimed an update for a never-logged title — the rating must still
+    // land somewhere rather than being dropped, so it inserts as a fresh row.
+    expect(fakeSupabase.updateCalls).toHaveLength(0);
     const itemInsert = fakeSupabase.insertCalls.find((c) => c.table === "items");
     expect(itemInsert?.payload).toMatchObject({
       user_id: USER_ID,
       item: "Inception",
       rating: 2,
       category: "movies",
+      status: "watched",
     });
   });
 });
@@ -395,7 +425,12 @@ describe("useChat — want-to-watch <ADD> (Cycle 6 / FR-001, FR-003, FR-005, FR-
     });
   });
 
-  it("dispatches the want-to-watch -> watched transition via <UPDATE> with status 'watched' and a real rating", async () => {
+  it("dispatches the want-to-watch -> watched transition via <UPDATE> as an in-place flip of the existing row", async () => {
+    fakeSupabase = createFakeSupabaseTables({
+      rowsForTable: {
+        items: [{ id: "wtw-row-1", item: "Dune", rating: null, status: "want_to_watch" }],
+      },
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
@@ -413,14 +448,12 @@ describe("useChat — want-to-watch <ADD> (Cycle 6 / FR-001, FR-003, FR-005, FR-
     const assistantMessage = result.current.messages[1];
     expect(assistantMessage.footnote).toEqual({ tone: "update", text: "Rating updated · Dune" });
 
-    const itemInsert = fakeSupabase.insertCalls.find((c) => c.table === "items");
-    // The want-to-watch -> watched transition always INSERTS a fresh row (never an
-    // in-place overwrite of the earlier want-to-watch row), tagged status "watched".
-    expect(itemInsert?.payload).toMatchObject({
-      item: "Dune",
-      rating: 5,
-      status: "watched",
-    });
+    // Cycle 8: the transition UPDATES the want-to-watch row itself — status flips to
+    // "watched" and the rating fills in; no second row for the same title.
+    const itemUpdate = fakeSupabase.updateCalls.find((c) => c.table === "items");
+    expect(itemUpdate?.payload).toMatchObject({ rating: 5, status: "watched" });
+    expect(itemUpdate?.filters).toMatchObject({ id: "wtw-row-1" });
+    expect(fakeSupabase.insertCalls.some((c) => c.table === "items")).toBe(false);
   });
 });
 
