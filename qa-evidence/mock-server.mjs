@@ -2,19 +2,15 @@
 // and stands in for the netlify/edge-functions/chat.ts edge function at POST /api/chat
 // with a REAL chunked SSE stream (written with delays) matching OpenAI's exact wire
 // format, since no OPENAI_API_KEY is available in this sandbox. Every other layer
-// (useChat.ts, sseParser.ts, tagParser.ts, ChatPanel.tsx, Supabase writes) is the real,
-// unmodified production code path.
+// (useChat.ts, sseParser.ts, tagParser.ts, ChatPanel.tsx, HistoryPanel.tsx, Supabase
+// reads/writes/realtime) is the real, unmodified production code path, running against
+// the real client Supabase project.
 //
-// Cycle 4 (PRD v5) update: added scripted scenarios for the new/amended behavior this
-// cycle actually changed — <UPDATE> re-mention, unrecognized-title clarification, and
-// the silent-retry-on-missing-tag loop (FR-001/FR-003/FR-004/FR-009). The retry
-// scenarios use a per-trigger call counter (`callCounts`) so the SAME scripted trigger
-// phrase can return a different scripted reply on attempt 1 vs. attempt 2 vs. attempt 3
-// — this is what lets a single mock endpoint stand in for "the model eventually
-// complies" vs. "the model never complies" without needing a real, non-deterministic
-// OpenAI call. A `GET /__calls?key=` endpoint exposes the counter so the evidence
-// script can assert exactly how many attempts the client made (proving the retry loop
-// ran 3x, not 1x) without relying on brittle timing.
+// Cycle 6 (PRD v7) QA update: added scripted scenarios for this cycle's amended/added
+// behavior — want-to-watch <ADD status="want_to_watch">, the want-to-watch -> watched
+// <UPDATE> transition, and the on-request <RECOMMEND> tag (FR-001/FR-003/FR-005/FR-008/
+// FR-009/FR-010) — alongside the still-in-regression-scope scenarios carried from prior
+// cycles (malformed/missing tags, unrecognized title, retry loop, adversarial input).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -53,6 +49,17 @@ const SCRIPTS = [
   {
     match: /liked the matrix/i,
     words: ["Glad ", "you ", "enjoyed ", "it. ", '<ADD item="The Matrix" rating="4" />'],
+  },
+  {
+    // Cycle 6 / FR-001, FR-003, FR-005: future-intent, no rating -> want-to-watch <ADD>.
+    match: /want to watch dune/i,
+    words: ["Got ", "it, ", "added ", "to ", "your ", "watchlist! ", '<ADD item="Dune" status="want_to_watch" />'],
+  },
+  {
+    // Cycle 6 / FR-009: the want-to-watch -> watched transition — a first real opinion
+    // on a previously want-to-watch title is a re-mention, so it's <UPDATE>, not <ADD>.
+    match: /finally watched dune/i,
+    words: ["Awesome, ", "glad ", "you ", "got ", "to ", "it! ", '<UPDATE item="Dune" rating="5" />'],
   },
   {
     // FR-009: re-mention of an already-logged title with a changed opinion -> <UPDATE>,
@@ -112,12 +119,67 @@ const SCRIPTS = [
     words: (call) => ["Sounds ", "like ", "a ", "mixed ", "reaction ", `(attempt ${call})!`],
   },
   {
+    // Cycle 6 / FR-004 bug fix: rewatch/changed-opinion phrasing that the model claims
+    // to act on in prose but NEVER emits a tag for, across all 3 attempts -> the
+    // extended opinion-heuristic must still catch this as a retry-then-fallback-and-log
+    // case (this is exactly the dev-reported "claimed but not written" defect).
+    match: /rewatchclaimprobe/i,
+    words: (call) => ["I'll ", "update ", "your ", "rating ", "now ", `(attempt ${call}).`],
+  },
+  {
     match: /movie was okay/i,
     words: ["Sounds ", "like ", "a ", "mixed ", "bag ", "- ", "which ", "movie ", "was ", "it?"],
   },
   {
     match: /write your essay|ignore previous instructions/i,
     words: ["I'm ", "just ", "here ", "to ", "chat ", "about ", "movies ", "- ", "what ", "have ", "you ", "watched ", "lately?"],
+  },
+  {
+    // Cycle 6 / FR-001, FR-003, FR-008: on-request recommendation, grounded + display-only.
+    match: /what should i watch next/i,
+    words: [
+      "Since ",
+      "you ",
+      "loved ",
+      "Inception, ",
+      "you ",
+      "might ",
+      "enjoy ",
+      "this ",
+      "one: ",
+      '<RECOMMEND item="Tenet" reason="Another mind-bending Christopher Nolan film with similar themes." />',
+    ],
+  },
+  {
+    // FR-004/FR-008: recommendation requested but the user has no rated items yet ->
+    // graceful decline, no tag, no fabricated pick.
+    match: /recommend something for a brand new user/i,
+    words: [
+      "I ",
+      "don't ",
+      "have ",
+      "enough ",
+      "of ",
+      "your ",
+      "taste ",
+      "to ",
+      "go ",
+      "on ",
+      "yet ",
+      "— ",
+      "log ",
+      "a ",
+      "few ",
+      "movies ",
+      "first ",
+      "and ",
+      "I'll ",
+      "have ",
+      "a ",
+      "pick ",
+      "for ",
+      "you!",
+    ],
   },
 ];
 const DEFAULT_WORDS = ["Tell ", "me ", "more ", "about ", "what ", "you ", "watched."];
