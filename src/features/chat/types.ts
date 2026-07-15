@@ -10,10 +10,17 @@ export interface FootnoteInfo {
   text: string;
 }
 
+/** Cycle 6 / FR-008: a successful, display-only <RECOMMEND> — never persisted. */
+export interface RecommendationInfo {
+  item: string;
+  reason: string;
+}
+
 export interface ChatUiMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   status: MessageStatus;
   footnote?: FootnoteInfo;
+  recommendation?: RecommendationInfo;
 }

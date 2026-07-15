@@ -55,3 +55,26 @@
   align-items: center;
   gap: var(--space-2);
 }
+
+/* Cycle 6 / FR-008: wraps each MessageBubble + its optional RecommendationCard as one
+   flex item so the recommendation card lines up under its bubble instead of breaking
+   the per-speaker alignment MessageBubble itself used to own as a direct flex child. */
+.chat-panel__turn {
+  display: flex;
+  flex-direction: column;
+  max-width: 78%;
+}
+
+.chat-panel__turn--assistant {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.chat-panel__turn--user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.chat-panel__turn .ui-message {
+  max-width: 100%;
+}

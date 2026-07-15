@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Badge, Button, Card, MessageBubble, Spinner, TextArea } from "../../components/ui";
+import { RecommendationCard } from "./RecommendationCard";
 import { useChat } from "./useChat";
 import "./ChatPanel.css";
 
@@ -8,21 +9,31 @@ export interface ChatPanelProps {
   /**
    * Cycle 4 / FR-009: the signed-in user's current Supabase access token, forwarded to
    * the edge function so it can read this user's own logged titles (RLS-scoped) for
-   * <UPDATE> fuzzy-matching. Optional — omitting it just means <UPDATE> never fires
-   * (every reply falls back to <ADD>), never a crash, so existing callers/tests that
-   * don't pass it keep working unchanged.
+   * <UPDATE> fuzzy-matching and <RECOMMEND> grounding (Cycle 6 / FR-008). Optional —
+   * omitting it just means <UPDATE>/<RECOMMEND> never fire (every reply falls back to
+   * <ADD>), never a crash, so existing callers/tests that don't pass it keep working
+   * unchanged.
    */
   accessToken?: string;
+  /**
+   * Cycle 6 / FR-004/FR-008: whether the signed-in user has at least one rated item,
+   * sourced from the live history panel's own data (FR-010) so the two features share
+   * one source of truth. Gates whether a tag-less reply to an explicit recommendation
+   * request gets logged as a missed <RECOMMEND> — a brand-new user's expected,
+   * graceful decline must never be mislabeled as a compliance miss.
+   */
+  hasRatedItems?: boolean;
 }
 
 /**
- * The whole chat experience (FR-002, FR-003, FR-004, FR-005): a single
+ * The whole chat experience (FR-002, FR-003, FR-004, FR-005, FR-008): a single
  * scrolling conversation plus a composer. Streaming text, the "Saved · X"
- * write confirmation, and non-crashing fallback states all render through
- * this one component so an evaluator only has one screen to pressure-test.
+ * write confirmation, the <RECOMMEND> card, and non-crashing fallback states
+ * all render through this one component so an evaluator only has one screen
+ * to pressure-test.
  */
-export function ChatPanel({ userId, accessToken }: ChatPanelProps) {
-  const { messages, historyStatus, sending, sendMessage } = useChat(userId, accessToken);
+export function ChatPanel({ userId, accessToken, hasRatedItems }: ChatPanelProps) {
+  const { messages, historyStatus, sending, sendMessage } = useChat(userId, accessToken, hasRatedItems);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -74,22 +85,26 @@ export function ChatPanel({ userId, accessToken }: ChatPanelProps) {
 
         {historyStatus === "ready" &&
           messages.map((message) => (
-            <MessageBubble
-              key={message.id}
-              role={message.role}
-              streaming={message.status === "streaming"}
-              footnote={
-                message.footnote ? <Badge tone={message.footnote.tone}>{message.footnote.text}</Badge> : undefined
-              }
-            >
-              {message.status === "pending" ? (
-                <span className="chat-panel__pending">
-                  <Spinner label="Waiting for a response" />
-                </span>
-              ) : (
-                message.content
+            <div key={message.id} className={`chat-panel__turn chat-panel__turn--${message.role}`}>
+              <MessageBubble
+                role={message.role}
+                streaming={message.status === "streaming"}
+                footnote={
+                  message.footnote ? <Badge tone={message.footnote.tone}>{message.footnote.text}</Badge> : undefined
+                }
+              >
+                {message.status === "pending" ? (
+                  <span className="chat-panel__pending">
+                    <Spinner label="Waiting for a response" />
+                  </span>
+                ) : (
+                  message.content
+                )}
+              </MessageBubble>
+              {message.recommendation && (
+                <RecommendationCard item={message.recommendation.item} reason={message.recommendation.reason} />
               )}
-            </MessageBubble>
+            </div>
           ))}
       </div>
 

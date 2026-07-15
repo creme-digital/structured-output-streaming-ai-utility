@@ -367,6 +367,156 @@ describe("useChat — silent retry on missing tag (Cycle 4 / FR-004 Issue 1)", (
   });
 });
 
+describe("useChat — want-to-watch <ADD> (Cycle 6 / FR-001, FR-003, FR-005, FR-009)", () => {
+  it("dispatches a want-to-watch <ADD> with a null rating and a distinct 'Want to watch' footnote", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(streamingResponse('Added to your list! <ADD item="Dune" status="want_to_watch" />')),
+      ),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I want to watch Dune");
+    });
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.footnote).toEqual({ tone: "watchlist", text: "Want to watch · Dune" });
+
+    const itemInsert = fakeSupabase.insertCalls.find((c) => c.table === "items");
+    expect(itemInsert?.payload).toMatchObject({
+      user_id: USER_ID,
+      item: "Dune",
+      rating: null,
+      status: "want_to_watch",
+    });
+  });
+
+  it("dispatches the want-to-watch -> watched transition via <UPDATE> with status 'watched' and a real rating", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(streamingResponse('Great, updating that! <UPDATE item="Dune" rating="5" />')),
+      ),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I finally watched Dune, loved it");
+    });
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.footnote).toEqual({ tone: "update", text: "Rating updated · Dune" });
+
+    const itemInsert = fakeSupabase.insertCalls.find((c) => c.table === "items");
+    // The want-to-watch -> watched transition always INSERTS a fresh row (never an
+    // in-place overwrite of the earlier want-to-watch row), tagged status "watched".
+    expect(itemInsert?.payload).toMatchObject({
+      item: "Dune",
+      rating: 5,
+      status: "watched",
+    });
+  });
+});
+
+describe("useChat — rewatch/changed-opinion phrasing triggers the same retry-then-log safety net as a first-time rating (Cycle 6 / FR-004 bug fix)", () => {
+  it("retries a rewatch re-mention that produced no <UPDATE> tag, then falls back and logs 'missing'", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(streamingResponse("I'll update your rating now.")),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("My opinion on The Lego Movie has changed after rewatching it");
+    });
+
+    // Previously this phrasing didn't engage the opinion heuristic at all, so the
+    // model's prose claim ("I'll update your rating now") went completely unlogged
+    // when no <UPDATE> tag actually landed. It must now get the full 3-attempt
+    // retry-then-fallback treatment, exactly like a missed first-time <ADD>.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      fakeSupabase.insertCalls.some((c) => c.table === "parse_failures" && c.payload.reason === "missing"),
+    ).toBe(true);
+  });
+});
+
+describe("useChat — <RECOMMEND> as a fourth registered, display-only tag type (FR-003, FR-008)", () => {
+  it("dispatches a successful <RECOMMEND> to a display-only recommendation, with no items insert", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          streamingResponse(
+            'You might enjoy this. <RECOMMEND item="Arrival" reason="Similar puzzle-box plotting to Inception." />',
+          ),
+        ),
+      ),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID, undefined, true));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("What should I watch next?");
+    });
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.recommendation).toEqual({
+      item: "Arrival",
+      reason: "Similar puzzle-box plotting to Inception.",
+    });
+    expect(assistantMessage.footnote).toBeUndefined();
+    expect(fakeSupabase.insertCalls.some((c) => c.table === "items")).toBe(false);
+  });
+
+  it("logs a 'missing' parse failure for a tag-less reply to an explicit recommendation request when the user has rated items", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(streamingResponse("Let me think about that for a moment."))),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID, undefined, true));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("What should I watch next?");
+    });
+
+    expect(
+      fakeSupabase.insertCalls.some((c) => c.table === "parse_failures" && c.payload.reason === "missing"),
+    ).toBe(true);
+  });
+
+  it("does NOT log a missing-recommendation failure when the user has no rated items yet (expected graceful decline)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          streamingResponse("I don't have enough of your taste to go on yet — log a few movies first!"),
+        ),
+      ),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID, undefined, false));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("What should I watch next?");
+    });
+
+    expect(fakeSupabase.insertCalls.some((c) => c.table === "parse_failures")).toBe(false);
+  });
+});
+
 describe("useChat — unrecognized-title clarification (Cycle 4 / FR-001 Issue 2, FR-004)", () => {
   it("logs 'unrecognized_title' and does not retry when the model asks for clarification", async () => {
     const fetchMock = vi.fn(() =>

@@ -58,6 +58,48 @@ describe("ChatPanel (FR-005)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("shows a distinct want-to-watch badge for a want-to-watch <ADD> (Cycle 6 / FR-005)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(streamingResponse('Noted! <ADD item="Dune" status="want_to_watch" />'))),
+    );
+
+    render(<ChatPanel userId="user-1" />);
+    const user = userEvent.setup();
+
+    const input = await screen.findByLabelText("Message");
+    await user.type(input, "I want to watch Dune");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Want to watch · Dune")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
+  it("renders a distinct recommendation card for a successful <RECOMMEND> (Cycle 6 / FR-008)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          streamingResponse('Try this one. <RECOMMEND item="Arrival" reason="Similar to Inception." />'),
+        ),
+      ),
+    );
+
+    render(<ChatPanel userId="user-1" hasRatedItems />);
+    const user = userEvent.setup();
+
+    const input = await screen.findByLabelText("Message");
+    await user.type(input, "What should I watch next?");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText("Recommended for you")).toBeInTheDocument();
+    expect(await screen.findByText("Arrival")).toBeInTheDocument();
+    expect(await screen.findByText("Similar to Inception.")).toBeInTheDocument();
+
+    vi.unstubAllGlobals();
+  });
+
   it("disables the composer while a reply is in flight", async () => {
     let finishStream!: () => void;
     const encoder = new TextEncoder();

@@ -4,6 +4,7 @@ import {
   AddTagAttrs,
   createDefaultTagRegistry,
   extractTags,
+  RecommendTagAttrs,
   stripTrailingPartialTag,
   TagRegistry,
 } from "../tagParser";
@@ -15,7 +16,9 @@ describe("extractTags — <ADD> position independence (FR-003 AC1)", () => {
     const text = 'Great pick! <ADD item="Inception" rating="5" />';
     const { matches, cleanedText } = extractTags(text, registry);
     expect(matches).toHaveLength(1);
-    expect(matches[0].attrs).toEqual({ item: "Inception", rating: 5 });
+    // Cycle 6 / FR-003: a plain <ADD> with no status attribute now parses to an
+    // explicit status: "watched" (the default), alongside the pre-existing item/rating.
+    expect(matches[0].attrs).toEqual({ item: "Inception", rating: 5, status: "watched" });
     expect(cleanedText).toBe("Great pick! ");
   });
 
@@ -84,6 +87,69 @@ describe("extractTags — <UPDATE> as a third registered tag type (Cycle 4 / FR-
     expect(matches).toHaveLength(0);
     expect(malformed).toHaveLength(1);
     expect(malformed[0].tag).toBe("UPDATE");
+  });
+});
+
+describe("extractTags — <ADD status=\"want_to_watch\"> (Cycle 6 / FR-001, FR-003)", () => {
+  const registry = createDefaultTagRegistry();
+
+  it("extracts a want-to-watch <ADD> with the rating attribute omitted, without treating it as malformed", () => {
+    const text = '<ADD item="Dune" status="want_to_watch" />';
+    const { matches, malformed } = extractTags(text, registry);
+    expect(malformed).toHaveLength(0);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].attrs).toEqual({ item: "Dune", rating: null, status: "want_to_watch" });
+  });
+
+  it("still requires rating for a normal <ADD> with no status attribute", () => {
+    const text = '<ADD item="Dune" />';
+    const { matches, malformed } = extractTags(text, registry);
+    expect(matches).toHaveLength(0);
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0].reason).toMatch(/rating/);
+  });
+
+  it("still requires rating for an <ADD> explicitly marked status=\"watched\"", () => {
+    const text = '<ADD item="Dune" status="watched" />';
+    const { matches, malformed } = extractTags(text, registry);
+    expect(matches).toHaveLength(0);
+    expect(malformed).toHaveLength(1);
+  });
+
+  it("flags an unrecognized status value as malformed", () => {
+    const text = '<ADD item="Dune" status="bogus" rating="5" />';
+    const { matches, malformed } = extractTags(text, registry);
+    expect(matches).toHaveLength(0);
+    expect(malformed).toHaveLength(1);
+  });
+});
+
+describe("extractTags — <RECOMMEND> as a third registered tag type (FR-003 AC + FR-008)", () => {
+  const registry = createDefaultTagRegistry();
+
+  it("extracts a well-formed <RECOMMEND> tag, display-only (no rating/item-write shape)", () => {
+    const text = 'You might like this one. <RECOMMEND item="Arrival" reason="You loved Inception\'s puzzle-box plotting." />';
+    const { matches, cleanedText } = extractTags(text, registry);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].tag).toBe("RECOMMEND");
+    const attrs = matches[0].attrs as unknown as RecommendTagAttrs;
+    expect(attrs.item).toBe("Arrival");
+    expect(attrs.reason).toMatch(/Inception/);
+    expect(cleanedText).toBe("You might like this one. ");
+  });
+
+  it("flags a <RECOMMEND> missing its reason attribute as malformed", () => {
+    const text = '<RECOMMEND item="Arrival" />';
+    const { matches, malformed } = extractTags(text, registry);
+    expect(matches).toHaveLength(0);
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0].tag).toBe("RECOMMEND");
+  });
+
+  it("extracts <ADD> and <RECOMMEND> as distinct tag types from the same response", () => {
+    const text = '<ADD item="Tenet" rating="4" /> <RECOMMEND item="Arrival" reason="Similar vibe." />';
+    const { matches } = extractTags(text, registry);
+    expect(matches.map((m) => m.tag)).toEqual(["ADD", "RECOMMEND"]);
   });
 });
 

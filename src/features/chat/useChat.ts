@@ -6,9 +6,12 @@ import {
   createDefaultTagRegistry,
   ExtractResult,
   extractTags,
+  RecommendTagAttrs,
   stripTrailingPartialTag,
+  UpdateTagAttrs,
 } from "../../lib/tagParser";
 import { looksLikeLoggableOpinion } from "../../lib/opinionHeuristic";
+import { looksLikeRecommendationRequest } from "../../lib/recommendationHeuristic";
 import { looksLikeUnrecognizedTitleClarification } from "../../lib/titleClarificationHeuristic";
 import { ChatUiMessage, FootnoteInfo } from "./types";
 
@@ -36,21 +39,25 @@ type AttemptOutcome =
   | { kind: "malformed"; extract: ExtractResult; rawBuffer: string; finalDisplay: string }
   | { kind: "unrecognized_title"; rawBuffer: string; finalDisplay: string }
   | { kind: "no_tag_retryable"; rawBuffer: string }
-  | { kind: "no_tag_final"; rawBuffer: string; finalDisplay: string; loggedAsMissing: boolean }
+  | { kind: "no_tag_final"; rawBuffer: string; finalDisplay: string; missKind: "opinion" | "recommendation" | null }
   | { kind: "empty"; rawBuffer: string }
   | { kind: "http_error"; detail: string };
 
 /**
  * Drives the whole chat experience: loads persisted history (FR-006), sends a
  * user turn, streams the assistant reply token-by-token (FR-002), extracts
- * `<ADD>`/`<UPDATE>` tags via the generic parser as the stream arrives (FR-003,
- * FR-009), and handles every failure mode without ever throwing past this hook
- * (FR-004). `accessToken` (Cycle 4 / FR-009) is optional and, when provided, is
- * forwarded to the edge function so it can read this user's own logged titles
- * (RLS-scoped) for <UPDATE> fuzzy-matching — omitting it just means <UPDATE>
- * never fires and every reply falls back to normal <ADD> behavior, never a crash.
+ * `<ADD>`/`<UPDATE>`/`<RECOMMEND>` tags via the generic parser as the stream arrives
+ * (FR-003, FR-008, FR-009), and handles every failure mode without ever throwing past
+ * this hook (FR-004). `accessToken` (Cycle 4 / FR-009) is optional and, when provided,
+ * is forwarded to the edge function so it can read this user's own logged titles
+ * (RLS-scoped) for <UPDATE> fuzzy-matching and <RECOMMEND> grounding — omitting it just
+ * means <UPDATE>/<RECOMMEND> never fire and every reply falls back to normal <ADD>
+ * behavior, never a crash. `hasRatedItems` (Cycle 6 / FR-004/FR-008) tells the missing-
+ * <RECOMMEND> classifier whether the user has any rated items at all, so a tag-less
+ * reply to "what should I watch?" from a brand-new user is never mislogged as a
+ * compliance miss (it's the system prompt's own correct, graceful decline).
  */
-export function useChat(userId: string, accessToken?: string) {
+export function useChat(userId: string, accessToken?: string, hasRatedItems?: boolean) {
   const [messages, setMessages] = useState<ChatUiMessage[]>([]);
   const [historyStatus, setHistoryStatus] = useState<HistoryStatus>("loading");
   const [sending, setSending] = useState(false);
@@ -248,16 +255,23 @@ export function useChat(userId: string, accessToken?: string) {
             const opinionLikely = looksLikeLoggableOpinion(trimmed);
             const attemptsRemain = attempt < MAX_ATTEMPTS;
             if (opinionLikely && attemptsRemain) {
-              continue; // silent retry (FR-004 Issue 1) — loop again
+              continue; // silent retry (FR-004 Issue 1, extended in Cycle 6 to also
+              // cover rewatch/changed-opinion phrasing) — loop again
             }
             // Either it never looked retry-worthy, or we've exhausted every attempt.
+            // Cycle 6 / FR-004 + FR-008: a missed <RECOMMEND> is logged too (as
+            // "missing", same as a missed <ADD>/<UPDATE>) but is NOT retried — the PRD
+            // only asks for fallback + logging there, not the 2-retry safety net, and
+            // `hasRatedItems` gates it so a brand-new user's expected, tag-less "log a
+            // few movies first" decline is never mislabeled as a compliance miss.
+            const recommendationLikely = hasRatedItems === true && looksLikeRecommendationRequest(trimmed);
             outcome = {
               kind: "no_tag_final",
               rawBuffer: attemptOutcome.rawBuffer,
               finalDisplay: stripTrailingPartialTag(
                 extractTags(attemptOutcome.rawBuffer, registryRef.current).cleanedText,
               ).trim(),
-              loggedAsMissing: opinionLikely,
+              missKind: opinionLikely ? "opinion" : recommendationLikely ? "recommendation" : null,
             };
             break;
           }
@@ -307,64 +321,107 @@ export function useChat(userId: string, accessToken?: string) {
           }
 
           case "no_tag_final": {
-            if (outcome.loggedAsMissing) {
+            if (outcome.missKind) {
               await logParseFailure(outcome.rawBuffer, "missing");
             }
-            updateMessage(assistantId, {
-              status: "done",
-              content: outcome.finalDisplay,
-              footnote: outcome.loggedAsMissing
+            const footnote: FootnoteInfo | undefined =
+              outcome.missKind === "opinion"
                 ? { tone: "neutral", text: "Didn't catch an item to log there." }
-                : undefined,
-            });
+                : outcome.missKind === "recommendation"
+                  ? { tone: "neutral", text: "Didn't catch a recommendation there." }
+                  : undefined;
+            updateMessage(assistantId, { status: "done", content: outcome.finalDisplay, footnote });
             break;
           }
 
           case "success": {
-            const insertResults = await Promise.all(
-              outcome.extract.matches.map((match) => {
-                const attrs = match.attrs as unknown as AddTagAttrs;
-                return supabase.from("items").insert({
-                  user_id: userId,
-                  item: attrs.item,
-                  rating: attrs.rating,
-                  category: "movies",
-                  raw_user_text: trimmed,
-                });
-              }),
-            );
+            // Cycle 6 / FR-003/FR-008: <ADD>/<UPDATE> write a row; <RECOMMEND> is
+            // display-only (FR-008) and never touches the database, so the two tag
+            // families are dispatched independently here.
+            const itemMatches = outcome.extract.matches.filter((m) => m.tag === "ADD" || m.tag === "UPDATE");
+            const recommendMatches = outcome.extract.matches.filter((m) => m.tag === "RECOMMEND");
 
-            const failedInsert = insertResults.find((r) => r.error);
-            let footnote: FootnoteInfo;
+            let footnote: FootnoteInfo | undefined;
 
-            if (failedInsert) {
-              await logParseFailure(outcome.rawBuffer, "other");
-              footnote = { tone: "danger", text: "Couldn't save that item — logged for review." };
-            } else {
-              const addNames = outcome.extract.matches
-                .filter((m) => m.tag === "ADD")
-                .map((m) => (m.attrs as unknown as AddTagAttrs).item);
-              const updateNames = outcome.extract.matches
-                .filter((m) => m.tag === "UPDATE")
-                .map((m) => (m.attrs as unknown as AddTagAttrs).item);
+            if (itemMatches.length > 0) {
+              const insertResults = await Promise.all(
+                itemMatches.map((match) => {
+                  if (match.tag === "ADD") {
+                    const attrs = match.attrs as unknown as AddTagAttrs;
+                    return supabase.from("items").insert({
+                      user_id: userId,
+                      item: attrs.item,
+                      rating: attrs.rating,
+                      category: "movies",
+                      raw_user_text: trimmed,
+                      status: attrs.status,
+                    });
+                  }
+                  // <UPDATE> (Cycle 4 / FR-009): always a fresh, real opinion — including
+                  // the want-to-watch -> watched transition (Cycle 6 / FR-009) — so it
+                  // always inserts with status "watched", never "want_to_watch".
+                  const attrs = match.attrs as unknown as UpdateTagAttrs;
+                  return supabase.from("items").insert({
+                    user_id: userId,
+                    item: attrs.item,
+                    rating: attrs.rating,
+                    category: "movies",
+                    raw_user_text: trimmed,
+                    status: "watched",
+                  });
+                }),
+              );
 
-              if (updateNames.length > 0 && addNames.length === 0) {
-                // Cycle 4 / FR-009: distinct "rating updated" confirmation, visually
-                // different from the <ADD> "Saved" badge (FR-005).
-                footnote = { tone: "update", text: `Rating updated · ${updateNames.join(", ")}` };
-              } else if (addNames.length > 0 && updateNames.length === 0) {
-                footnote = { tone: "success", text: `Saved · ${addNames.join(", ")}` };
+              const failedInsert = insertResults.find((r) => r.error);
+
+              if (failedInsert) {
+                await logParseFailure(outcome.rawBuffer, "other");
+                footnote = { tone: "danger", text: "Couldn't save that item — logged for review." };
               } else {
-                // Defensive: the system prompt asks for at most one tag per reply, but
-                // don't assume — surface both confirmations rather than dropping one.
-                const parts: string[] = [];
-                if (addNames.length) parts.push(`Saved · ${addNames.join(", ")}`);
-                if (updateNames.length) parts.push(`Rating updated · ${updateNames.join(", ")}`);
-                footnote = { tone: "update", text: parts.join(" · ") };
+                const watchedNames = itemMatches
+                  .filter((m) => m.tag === "ADD" && (m.attrs as unknown as AddTagAttrs).status === "watched")
+                  .map((m) => (m.attrs as unknown as AddTagAttrs).item);
+                const watchlistNames = itemMatches
+                  .filter((m) => m.tag === "ADD" && (m.attrs as unknown as AddTagAttrs).status === "want_to_watch")
+                  .map((m) => (m.attrs as unknown as AddTagAttrs).item);
+                const updateNames = itemMatches
+                  .filter((m) => m.tag === "UPDATE")
+                  .map((m) => (m.attrs as unknown as UpdateTagAttrs).item);
+
+                const parts: FootnoteInfo[] = [];
+                if (watchedNames.length) parts.push({ tone: "success", text: `Saved · ${watchedNames.join(", ")}` });
+                if (watchlistNames.length)
+                  // Cycle 6 / FR-005: a distinct want-to-watch marker, never confused
+                  // with a rated "Saved" log or an <UPDATE> "Rating updated" badge.
+                  parts.push({ tone: "watchlist", text: `Want to watch · ${watchlistNames.join(", ")}` });
+                if (updateNames.length)
+                  // Cycle 4 / FR-009: distinct "rating updated" confirmation.
+                  parts.push({ tone: "update", text: `Rating updated · ${updateNames.join(", ")}` });
+
+                if (parts.length === 1) {
+                  footnote = parts[0];
+                } else if (parts.length > 1) {
+                  // Defensive: the system prompt asks for at most one of <ADD>/<UPDATE>
+                  // per reply, but don't assume — surface every confirmation rather
+                  // than silently dropping one.
+                  footnote = { tone: parts[0].tone, text: parts.map((p) => p.text).join(" · ") };
+                }
               }
             }
 
-            updateMessage(assistantId, { status: "done", content: outcome.finalDisplay, footnote });
+            // Cycle 6 / FR-008: fire-and-forget, display-only — no DB write, rendered
+            // as a distinct card (ChatPanel.tsx) rather than the footnote pill.
+            const recommendation =
+              recommendMatches.length > 0
+                ? (recommendMatches[0].attrs as unknown as RecommendTagAttrs)
+                : undefined;
+
+            updateMessage(assistantId, {
+              status: "done",
+              content: outcome.finalDisplay,
+              footnote,
+              recommendation,
+            });
             break;
           }
         }
@@ -397,7 +454,7 @@ export function useChat(userId: string, accessToken?: string) {
         setSending(false);
       }
     },
-    [sending, userId, accessToken, updateMessage, logParseFailure],
+    [sending, userId, accessToken, hasRatedItems, updateMessage, logParseFailure],
   );
 
   return { messages, historyStatus, sending, sendMessage };

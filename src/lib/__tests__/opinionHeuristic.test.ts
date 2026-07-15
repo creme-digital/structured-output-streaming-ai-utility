@@ -26,3 +26,25 @@ describe("looksLikeLoggableOpinion", () => {
     expect(looksLikeLoggableOpinion("   ")).toBe(false);
   });
 });
+
+describe("looksLikeLoggableOpinion — changed-opinion / rewatch phrasing (Cycle 6 / FR-004 bug fix)", () => {
+  it("recognizes a rewatch mention even with no first-time sentiment word", () => {
+    expect(looksLikeLoggableOpinion("My opinion on The Lego Movie has changed after rewatching it")).toBe(true);
+  });
+
+  it("recognizes explicit 'changed my mind' phrasing", () => {
+    expect(looksLikeLoggableOpinion("I changed my mind about Inception")).toBe(true);
+  });
+
+  it("recognizes 'rewatched' on its own", () => {
+    expect(looksLikeLoggableOpinion("I rewatched Tenet last night")).toBe(true);
+  });
+
+  it("recognizes 'actually hated/loved' re-rating phrasing", () => {
+    expect(looksLikeLoggableOpinion("I actually hated it this time around")).toBe(true);
+  });
+
+  it("recognizes 'second viewing' phrasing", () => {
+    expect(looksLikeLoggableOpinion("On my second viewing of Dune I liked it a lot more")).toBe(true);
+  });
+});

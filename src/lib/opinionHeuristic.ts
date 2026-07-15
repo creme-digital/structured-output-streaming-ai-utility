@@ -14,6 +14,16 @@
  *
  * This is documented as a medium-confidence, dev-team judgment call (see the
  * build summary) — the exact word list is illustrative, not exhaustive.
+ *
+ * Cycle 6 / FR-004 bug fix: the dev reported the model saying "I'll update your rating
+ * now" for a rewatch/changed-opinion re-mention while nothing actually landed in the
+ * database — root-caused to this heuristic not recognizing changed-opinion/rewatch
+ * phrasing (as opposed to first-time sentiment words), so the retry-then-fallback
+ * safety net below never engaged and the miss went completely unlogged. The signals in
+ * the second group below close that gap: they fire on re-rating/rewatch language even
+ * when it carries no first-time sentiment word of its own (e.g. "my opinion on X has
+ * changed" has no "loved"/"hated" etc.), so a claimed-but-unemitted <UPDATE> now gets
+ * exactly the same 2-retry-then-log discipline as a missed <ADD>.
  */
 const OPINION_SIGNALS = [
   /\bloved?\b/i,
@@ -34,6 +44,15 @@ const OPINION_SIGNALS = [
   /\bbest\b/i,
   /\bworst\b/i,
   /\bfavou?rite\b/i,
+  // Changed-opinion / rewatch / re-rating phrasing (Cycle 6 / FR-004 bug fix).
+  /\bre-?watch(?:ed|ing)?\b/i,
+  /\brewatch(?:ed|ing)?\b/i,
+  /\bre-?rat(?:e|ed|ing)\b/i,
+  /\bchang(?:ed|ing)?\s+my\s+(?:mind|opinion|rating)\b/i,
+  /\bopinion\s+(?:on|about|of)\b.*\bchang/i,
+  /\breconsider(?:ed|ing)?\b/i,
+  /\bsecond\s+(?:watch|viewing|time\s+watching)\b/i,
+  /\bactually\s+(?:loved?|hated|liked|disliked)\b/i,
 ];
 
 /**

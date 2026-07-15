@@ -6,7 +6,11 @@ const auth = createFakeSupabaseAuth();
 const tables = createFakeSupabaseTables();
 
 vi.mock("../lib/supabaseClient", () => ({
-  supabase: { auth, from: tables.from },
+  // Cycle 6 / FR-010: Home now also renders the live history panel, whose `useHistory`
+  // hook calls `supabase.channel(...)`/`removeChannel(...)` for its realtime
+  // subscription — included here so rendering the authenticated `Home` screen doesn't
+  // throw on a missing mock method.
+  supabase: { auth, from: tables.from, channel: tables.channel, removeChannel: tables.removeChannel },
 }));
 
 const { App } = await import("../App");
@@ -40,15 +44,19 @@ describe("App auth gating (FR-006)", () => {
     auth.getSession.mockResolvedValueOnce({
       data: { session: { user: { id: "user-2", email: "demo2@stealthco.test" } } },
     });
-    tables.from.mockImplementationOnce(() => {
-      const builder = {
-        select: () => builder,
-        eq: () => builder,
-        order: () => Promise.resolve({ data: null, error: { message: "down" } }),
-        insert: () => Promise.resolve({ data: null, error: null }),
-      };
-      return builder;
-    });
+    // Cycle 6 / FR-010: Home now mounts two independent `.from(...)` consumers on mount
+    // (ChatPanel's chat history, HistoryPanel's item history via `useHistory`) whose
+    // effect-firing order isn't something this test should depend on — keyed on table
+    // name instead of "the first call" so this only ever exercises the chat-history
+    // failure path, regardless of which effect happens to run first.
+    const errorBuilder = {
+      select: () => errorBuilder,
+      eq: () => errorBuilder,
+      order: () => Promise.resolve({ data: null, error: { message: "down" } }),
+      insert: () => Promise.resolve({ data: null, error: null }),
+    };
+    const originalImpl = tables.from.getMockImplementation()!;
+    tables.from.mockImplementation((table: string) => (table === "chat_messages" ? errorBuilder : originalImpl(table)));
 
     render(<App />);
 

@@ -11,16 +11,22 @@ Browser (React SPA)
   │  fetch("/api/chat", { messages, accessToken })
   ▼
 Netlify Edge Function (netlify/edge-functions/chat.ts, Deno)
-  │  reads caller's own logged titles (RLS-scoped, via accessToken — Cycle 4/FR-009),
-  │  injects SYSTEM_PROMPT (+ that titles list) + OPENAI_API_KEY, streams request through
+  │  reads caller's own items ONCE (RLS-scoped, via accessToken — Cycle 4/FR-009),
+  │  injects SYSTEM_PROMPT + a titles-context message (all statuses, ADD-vs-UPDATE
+  │  matching) + a rated-only recommendation-context message (Cycle 6/FR-008) +
+  │  OPENAI_API_KEY, streams request through
   ▼
 OpenAI chat-completions API (stream: true, temperature 0.2)
   │  SSE deltas flow back through the edge function unmodified
   ▼
 Browser: OpenAIStreamDecoder → extractTags() → React state (token-by-token render)
-  │  on successful <ADD>/<UPDATE> tag / on malformed / on unrecognized-title / on failure
+  │  on successful <ADD>/<UPDATE>/<RECOMMEND> tag / on malformed / on
+  │  unrecognized-title / on failure
   ▼
 Supabase (Postgres, RLS) — items / chat_messages / parse_failures / profiles
+  │  + a realtime subscription on items INSERT (Cycle 6 / FR-010, RLS-scoped)
+  ▼
+Browser: live history panel (Rated / Want to Watch tabs)
 ```
 
 The OpenAI API key never reaches the browser: the edge function is the only piece of
@@ -49,26 +55,45 @@ match — `<UPDATE>` uses the exact same `insert` call as `<ADD>`, never an `upd
 so re-mentioning a title deliberately produces a **second, later-`created_at` row** for
 that `(user_id, item)` pair rather than overwriting the first. A user's `items` rows are
 therefore no longer guaranteed one-per-title: **the "current" rating for a title is the
-latest `created_at` row for that title**, and any downstream reader (e.g. FR-008's
-recommendation grounding, if it's ever built) must not assume uniqueness.
+latest `created_at` row for that title**, and any downstream reader must not assume
+uniqueness.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | `gen_random_uuid()` default |
 | `user_id` | uuid | FK → `auth.users`, isolation key |
 | `item` | text | Movie title — verbatim from the tag's `item` attribute for `<ADD>`, or the reference-list spelling the model was given for `<UPDATE>` (see systemPrompt.ts) |
-| `rating` | numeric | **LLM-estimated**, 1–5 integer scale, see "Rating scale" below — never a value the user typed directly |
+| `rating` | numeric, nullable (Cycle 6) | **LLM-estimated**, 1–5 integer scale, see "Rating scale" below — never a value the user typed directly. NULL for a want-to-watch row (Cycle 6 / FR-001/FR-003): the `NOT NULL` constraint was dropped in `006_items_status_and_realtime.sql` specifically to allow this; every rated `<ADD>`/`<UPDATE>` still always carries a real 1–5 value |
 | `category` | text | Hardcoded `"movies"` at the call site (`useChat.ts`); column exists for forward-compatibility, no other category is exercised |
 | `raw_user_text` | text | The triggering user message, kept as tracking metadata |
 | `created_at` | timestamptz | default `now()` |
+| `status` | text, `default 'watched'` (Cycle 6) | `"watched"` for a normal rated `<ADD>`/any `<UPDATE>` (including the want-to-watch → watched transition); `"want_to_watch"` for `<ADD status="want_to_watch" />` (rating NULL). Existing rows all backfilled to `"watched"` automatically via the column default — no historical row is reinterpreted. Checked in Postgres (`status in ('watched', 'want_to_watch')`) |
 
 Constraint: `rating between 1 and 5` enforced in Postgres (`002_items.sql`), matching the
 scale the system prompt instructs the model to use — a belt-and-suspenders check in case
 a future prompt change or model drift ever produced an out-of-range value (the frontend's
 `ADD_TAG_DEFINITION.validate` in `tagParser.ts`, reused unchanged as `UPDATE_TAG_DEFINITION.validate`,
 already rejects those before they'd reach Supabase, but the DB constraint holds regardless
-of client behavior). No schema change was needed for `<UPDATE>` — same table, same columns,
-same constraint, purely additive.
+of client behavior). That check already tolerated `NULL` (a NULL comparison is never
+`FALSE`), so no constraint edit was needed there when `rating` was made nullable — only
+the column's own `NOT NULL` needed dropping. No schema change was needed for `<UPDATE>`
+itself — same table, same columns, purely additive.
+
+**Recommendation grounding (Cycle 6 / FR-008) reads `items` too**, but only rows with
+`status = 'watched'` and a non-null `rating` — a want-to-watch row carries no opinion
+signal and must never be treated as an expressed preference (`buildRecommendationContextMessage`
+in `systemPrompt.ts`, called from the edge function's `fetchUserItemContext`). The
+ADD-vs-UPDATE title-matching context (`buildExistingTitlesMessage`), by contrast,
+deliberately includes titles of BOTH statuses, since a want-to-watch title still counts
+as "already logged" for the purpose of routing a later opinion to `<UPDATE>` instead of
+a fresh `<ADD>` (the want-to-watch → watched transition, FR-009).
+
+**Realtime**: `items` is registered on the `supabase_realtime` publication
+(`006_items_status_and_realtime.sql`) so the live history panel (FR-010) can subscribe to
+`INSERT` events. RLS still governs what a given subscriber actually receives via
+Supabase's per-subscriber RLS evaluation for `postgres_changes` — the subscription's own
+`filter: user_id=eq.<userId>` is a defense-in-depth/noise-reduction nicety, not the
+isolation boundary.
 
 ### `chat_messages`
 One row per turn (`role: 'user' | 'assistant'`), written by `useChat.ts` right after the
@@ -155,26 +180,44 @@ isolation or integrity benefit.
    client only ever sees a growing prefix of the full response.
 5. Once the stream ends (`[DONE]` or the reader closes), `extractTags()` runs one final
    time against the complete `rawBuffer` (this is one "attempt" — see the retry loop
-   below) to decide what actually happened:
+   below) to decide what actually happened. `<ADD>`/`<UPDATE>` matches and `<RECOMMEND>`
+   matches (Cycle 6 / FR-008) are dispatched independently — a single reply could in
+   principle carry one of each, though the system prompt asks for that only when the
+   user's message both states an opinion and asks for a recommendation in the same turn:
    - one or more valid `<ADD>`/`<UPDATE>` matches → insert into `items` (both tags
-     insert; `<UPDATE>` never overwrites), footnote `Saved · <name>` for `<ADD>` or
-     `Rating updated · <name>` (`tone="update"`) for `<UPDATE>`;
-   - a recognized-but-malformed `<ADD>` or `<UPDATE>` tag → log to `parse_failures`
-     (`reason: "malformed"`), footnote `Couldn't log that — logged for review.`;
+     insert; `<UPDATE>` never overwrites, always `status: "watched"`), footnote
+     `Saved · <name>` for a rated `<ADD>`, `Want to watch · <name>` (`tone="watchlist"`,
+     Cycle 6 / FR-005) for `<ADD status="want_to_watch" />`, or `Rating updated · <name>`
+     (`tone="update"`) for `<UPDATE>` (including the want-to-watch → watched transition);
+   - a valid `<RECOMMEND>` match (Cycle 6 / FR-008) → no database write, rendered as a
+     distinct `RecommendationCard` (not the footnote pill) under the assistant's bubble;
+   - a recognized-but-malformed `<ADD>`/`<UPDATE>`/`<RECOMMEND>` tag → log to
+     `parse_failures` (`reason: "malformed"`), footnote
+     `Couldn't log that — logged for review.`;
    - no tag, but the reply reads like the model's unrecognized-title clarification
      (`looksLikeUnrecognizedTitleClarification`, `titleClarificationHeuristic.ts` —
      Cycle 4 / FR-001 Issue 2) → **not retried**, logged to `parse_failures`
      (`reason: "unrecognized_title"`), shown as an ordinary conversational reply with
      no footnote (expected behavior, not a failure);
-   - no tag, and `looksLikeLoggableOpinion(userText)` (`opinionHeuristic.ts`) is true →
-     **Cycle 4 / FR-004 Issue 1 retry loop**: silently re-run this whole attempt (steps
-     2–5) up to 2 more times (3 attempts total), discarding every failed attempt's
-     streamed text entirely — the user only ever sees the *last* attempt's output. If
-     an attempt in the loop finally produces a tag, it's handled by the branches above
-     as normal. If all 3 attempts produce no tag, log `reason: "missing"` once, neutral
-     footnote;
-   - no tag and the user's message didn't look like an opinion → ordinary conversation,
-     nothing logged, no footnote, no retry;
+   - no tag, and `looksLikeLoggableOpinion(userText)` (`opinionHeuristic.ts`, extended in
+     Cycle 6 to also recognize rewatch/changed-opinion phrasing — see "Assumptions &
+     decisions") is true → **FR-004 Issue 1 retry loop**: silently re-run this whole
+     attempt (steps 2–5) up to 2 more times (3 attempts total), discarding every failed
+     attempt's streamed text entirely — the user only ever sees the *last* attempt's
+     output. If an attempt in the loop finally produces a tag, it's handled by the
+     branches above as normal. If all 3 attempts produce no tag, log `reason: "missing"`
+     once, neutral footnote;
+   - no tag, opinion-heuristic false, but `looksLikeRecommendationRequest(userText)`
+     (`recommendationHeuristic.ts`, Cycle 6 / FR-008) is true AND the caller told
+     `useChat` the user has at least one rated item (`hasRatedItems`, sourced from
+     `useHistory` via `Home.tsx`) → logged once as `reason: "missing"`, same neutral
+     footnote treatment, but **not retried** (the PRD scopes the 2-retry safety net to
+     FR-004 Issue 1's `<ADD>`/`<UPDATE>` fix, not `<RECOMMEND>`). `hasRatedItems` gates
+     this specifically so a brand-new user's expected, tag-less "log a few movies first"
+     decline (FR-004's "no fabricated personalized recommendation from empty data") is
+     never mislabeled as a compliance miss;
+   - no tag and neither heuristic fired → ordinary conversation, nothing logged, no
+     footnote, no retry;
    - empty final text, non-OK HTTP response, or any thrown exception anywhere in the
      above → `reason: "other"`, danger-toned fallback message, **never** an unhandled
      exception surfaced to the user (all paths are wrapped in `try/catch` inside
@@ -182,49 +225,73 @@ isolation or integrity benefit.
 6. The assistant's final displayed text (tag stripped) is persisted to `chat_messages`
    regardless of which branch above fired — only the surviving, kept attempt's text is
    ever persisted; discarded retry attempts are never written anywhere.
+7. Independently of the chat stream, `useHistory` (Cycle 6 / FR-010) holds its own
+   RLS-scoped read of the signed-in user's `items` plus a realtime subscription on
+   `items` INSERT events — so a row inserted by step 5 above shows up in the history
+   panel's "Rated"/"Want to Watch" tab live, with no manual refresh and no coupling
+   between the chat code path and the history panel's own data path.
 
 ## Functional requirements → code map
 
 | FR | Requirement | Where it lives |
 |---|---|---|
-| FR-001 | System prompt driving inline `<ADD>`/`<UPDATE>` emission, rating inference, conservative temperature, unrecognized-title clarification | `src/lib/systemPrompt.ts` (`SYSTEM_PROMPT`, `buildExistingTitlesMessage`, imported by the edge function); `src/lib/openaiRequest.ts` (`OPENAI_TEMPERATURE = 0.2`, documented in-file — Cycle 4 / Issue 1); contract asserted by `src/lib/__tests__/systemPrompt.test.ts` and `openaiRequest.test.ts` |
-| FR-002 | Token-by-token streaming | `netlify/edge-functions/chat.ts` (SSE passthrough, no buffering) + `src/lib/sseParser.ts` (incremental decode) + `src/features/chat/useChat.ts` (`reader.read()` loop updates React state per chunk) — unchanged this cycle apart from the retry loop wrapping the same per-chunk logic |
-| FR-003 | Generic, position-independent tag parser | `src/lib/tagParser.ts` — `TagRegistry`/`extractTags` engine is tag-agnostic; `createDefaultTagRegistry()` registers **two** definitions, `ADD_TAG_DEFINITION` and `UPDATE_TAG_DEFINITION` (Cycle 4 / FR-009 — same `validateItemRatingAttrs`, different dispatch in `useChat.ts`); see file header for how `RECOMMEND`/`REMOVE` would be added without touching `extractTags` |
-| FR-004 | Graceful failure (malformed/missing/ambiguous/off-topic, no silent failure) + Cycle 4 silent-retry + unrecognized-title logging | `src/features/chat/useChat.ts` (`runAttempt`/retry loop, all branches) + `src/lib/opinionHeuristic.ts` (missing-vs-ordinary-chat classifier) + `src/lib/titleClarificationHeuristic.ts` (unrecognized-title classifier, Cycle 4) + `parse_failures` table (`reason` now includes `unrecognized_title`, `supabase/migrations/005_...sql`) |
-| FR-005 | Clean minimal chat UI with write confirmation + distinct "rating updated" badge | `src/features/chat/ChatPanel.tsx` (streaming caret via `MessageBubble`'s `streaming` prop, `Badge` footnote for confirmation/failure) + `src/components/ui/` (`Badge` gains `tone="update"`, Cycle 4 / FR-009 — distinct accent-soft styling from `success`/`danger`/`neutral`) + `src/components/layout/AppShell.tsx` |
-| FR-006 | Email/password auth, persisted chat, per-user isolation | `src/context/AuthContext.tsx`, `src/features/auth/AuthScreen.tsx`, RLS policies in all `supabase/migrations/*.sql` files (unchanged this cycle; the Cycle-4 `<UPDATE>` insert and titles-read both reuse existing `items` RLS policies, no new policy needed) |
-| FR-007 | Netlify deployment + deliverables, incl. Cycle 5's edge-function build/deploy fix | `netlify.toml` (build command + SPA publish dir), `public/_redirects` (SPA fallback routing); the actual deploy, repo link, and written summary are produced by this pipeline's later (docs/deploy) step, not by app code. Cycle 5: `netlify/edge-functions/chat.ts`'s `@supabase/supabase-js` import moved from an `npm:` specifier to a Deno-native `https://esm.sh/@supabase/supabase-js@2.110.3` ESM URL to unblock Netlify's edge bundler; locked in by `netlify/edge-functions/__tests__/chat.imports.test.ts` |
-| FR-008 | Personalized, on-request `<RECOMMEND>` tag | **Still not implemented.** `createDefaultTagRegistry()` (`src/lib/tagParser.ts`) registers `ADD_TAG_DEFINITION` and `UPDATE_TAG_DEFINITION` only; there is no `RECOMMEND` tag definition, no system-prompt clause conditioning its emission, and no distinct-card rendering anywhere in `src/`. This cycle's change_log scopes only FR-001/003/004/009, so per the touch-only-what's-required rule this pre-existing (Cycle 3) gap was carried forward rather than opportunistically built. See "Assumptions & decisions → Cycle 3" and "→ Cycle 4" below. |
-| FR-009 | `<UPDATE>` as a third inline tag type: model-side fuzzy re-mention matching, insert-with-history, distinct "rating updated" badge | `src/lib/systemPrompt.ts` (`buildExistingTitlesMessage` + ADD-vs-UPDATE prompt rules) + `netlify/edge-functions/chat.ts` (`fetchExistingTitlesMessage`, RLS-scoped per-request read of the caller's own titles) + `src/lib/tagParser.ts` (`UPDATE_TAG_DEFINITION`) + `src/features/chat/useChat.ts` (insert dispatch + `tone="update"` footnote) + `src/components/ui/Badge.tsx` (`"update"` tone) |
+| FR-001 | System prompt driving inline `<ADD>`/`<UPDATE>`/`<RECOMMEND>` emission, rating inference, conservative temperature, unrecognized-title clarification, action-integrity guard, want-to-watch variant | `src/lib/systemPrompt.ts` (`SYSTEM_PROMPT`, `buildExistingTitlesMessage`, `buildRecommendationContextMessage` — Cycle 6, imported by the edge function); `src/lib/openaiRequest.ts` (`OPENAI_TEMPERATURE = 0.2`, documented in-file); contract asserted by `src/lib/__tests__/systemPrompt.test.ts` and `openaiRequest.test.ts` |
+| FR-002 | Token-by-token streaming | `netlify/edge-functions/chat.ts` (SSE passthrough, no buffering) + `src/lib/sseParser.ts` (incremental decode) + `src/features/chat/useChat.ts` (`reader.read()` loop updates React state per chunk) — unchanged this cycle |
+| FR-003 | Generic, position-independent tag parser | `src/lib/tagParser.ts` — `TagRegistry`/`extractTags` engine is tag-agnostic (Cycle 6: `requiredAttrs` may now be a function of the tag's own attributes, so `<ADD>`'s `rating` is conditionally required — needed for the want-to-watch variant without weakening `<ADD>`'s malformed-detection); `createDefaultTagRegistry()` registers **three** definitions, `ADD_TAG_DEFINITION`, `UPDATE_TAG_DEFINITION`, and `RECOMMEND_TAG_DEFINITION` (Cycle 6 — finishing FR-008, see "Assumptions & decisions") |
+| FR-004 | Graceful failure (malformed/missing/ambiguous/off-topic, no silent failure) + silent-retry + unrecognized-title logging + missing-`<RECOMMEND>` logging | `src/features/chat/useChat.ts` (`runAttempt`/retry loop, all branches) + `src/lib/opinionHeuristic.ts` (missing-vs-ordinary-chat classifier, extended Cycle 6 for rewatch/changed-opinion phrasing) + `src/lib/recommendationHeuristic.ts` (Cycle 6, missing-`<RECOMMEND>` classifier, gated by `hasRatedItems`, no retry) + `src/lib/titleClarificationHeuristic.ts` (unrecognized-title classifier) + `parse_failures` table (`reason` includes `unrecognized_title`, `supabase/migrations/005_...sql`) |
+| FR-005 | Clean minimal chat UI with write confirmation + distinct "rating updated"/"want to watch" badges + `<RECOMMEND>` card | `src/features/chat/ChatPanel.tsx` (streaming caret via `MessageBubble`'s `streaming` prop, `Badge` footnote for confirmation/failure, `RecommendationCard` — Cycle 6) + `src/components/ui/` (`Badge` tones `update`/`watchlist`) + `src/components/layout/AppShell.tsx` |
+| FR-006 | Email/password auth, persisted chat, per-user isolation | `src/context/AuthContext.tsx`, `src/features/auth/AuthScreen.tsx`, RLS policies in all `supabase/migrations/*.sql` files (unchanged this cycle; the new `items.status` column and realtime publication registration in `006_...sql` don't touch RLS — isolation is still `auth.uid() = user_id` throughout) |
+| FR-007 | Netlify deployment + deliverables, incl. the edge-function build/deploy fix | `netlify.toml` (build command + SPA publish dir), `public/_redirects` (SPA fallback routing); the actual deploy, repo link, and written summary are produced by this pipeline's later (docs/deploy) step, not by app code. `netlify/edge-functions/chat.ts`'s `@supabase/supabase-js` import is a Deno-native `https://esm.sh/@supabase/supabase-js@2.110.3` ESM URL; locked in by `netlify/edge-functions/__tests__/chat.imports.test.ts` |
+| FR-008 | Personalized, on-request `<RECOMMEND>` tag, grounded in rated (non-watchlist) items only | **Finished this cycle** (Cycle 6) — see "Assumptions & decisions" for why it had been carried forward unbuilt for three prior cycles. `src/lib/tagParser.ts` (`RECOMMEND_TAG_DEFINITION`, display-only), `src/lib/systemPrompt.ts` (`buildRecommendationContextMessage`, rated-only grounding + prompt rules), `netlify/edge-functions/chat.ts` (`fetchUserItemContext`), `src/features/chat/useChat.ts` (recommendation dispatch, no DB write), `src/features/chat/RecommendationCard.tsx` (distinct card) |
+| FR-009 | `<UPDATE>` as a third inline tag type: model-side fuzzy re-mention matching, insert-with-history, distinct "rating updated" badge, want-to-watch → watched transition | `src/lib/systemPrompt.ts` (`buildExistingTitlesMessage` + ADD-vs-UPDATE prompt rules, now spans both statuses) + `netlify/edge-functions/chat.ts` (`fetchUserItemContext`, RLS-scoped per-request read of the caller's own titles) + `src/lib/tagParser.ts` (`UPDATE_TAG_DEFINITION`) + `src/features/chat/useChat.ts` (insert dispatch, always `status: "watched"`, `tone="update"` footnote) + `src/components/ui/Badge.tsx` (`"update"` tone) |
+| FR-010 | Live history panel, "Rated"/"Want to Watch" tabs, realtime | `src/features/history/useHistory.ts` (RLS-scoped read + `supabase.channel(...)` realtime subscription on `items` INSERT), `src/features/history/HistoryPanel.tsx`/`.css` (presentational, `Tabs` primitive), `src/pages/Home.tsx` (wires `useHistory` into both `HistoryPanel` and `ChatPanel`'s `hasRatedItems`), `supabase/migrations/006_items_status_and_realtime.sql` (publication registration) |
 
 ## Test coverage as built
 
 `vitest` + `@testing-library/react`, run via `npm test`:
 
 - `src/lib/__tests__/tagParser.test.ts` — tag position independence (start/middle/end),
-  malformed/missing-attribute handling, multi-tag-type registry extensibility, and
-  (Cycle 4) `UPDATE_TAG_DEFINITION` registration + identical malformed-handling to `<ADD>`.
+  malformed/missing-attribute handling, multi-tag-type registry extensibility,
+  `UPDATE_TAG_DEFINITION` registration + identical malformed-handling to `<ADD>`, and
+  (Cycle 6) the want-to-watch `<ADD>` variant (rating omitted, unrecognized `status`
+  rejected) and `RECOMMEND_TAG_DEFINITION` (well-formed extraction, missing-`reason`
+  malformed, distinct-from-`<ADD>` dispatch).
 - `src/lib/__tests__/sseParser.test.ts` — SSE line buffering across chunk boundaries,
   `[DONE]` handling, malformed-line resilience.
 - `src/lib/__tests__/systemPrompt.test.ts` — asserts the prompt contract the parser
   depends on (tag shape, rating scale documented, ADD-vs-UPDATE rules, unrecognized-title
-  clarification instruction) and `buildExistingTitlesMessage` (dedup, cap, null-when-empty).
+  clarification instruction, and Cycle 6's want-to-watch variant, `<RECOMMEND>` rules,
+  and action-integrity guard), `buildExistingTitlesMessage`, and (Cycle 6)
+  `buildRecommendationContextMessage` (dedup, cap, null-when-empty, ignores unrated rows).
 - `src/lib/__tests__/openaiRequest.test.ts` — request body shape (`stream: true`, model,
-  and Cycle 4's `temperature: 0.2`).
-- `src/lib/__tests__/opinionHeuristic.test.ts` — opinion-signal classification cases.
-- `src/lib/__tests__/titleClarificationHeuristic.test.ts` — (Cycle 4) recognizes the
-  model's "don't recognize ... movie" clarification phrasing, rejects unrelated replies.
+  `temperature: 0.2`).
+- `src/lib/__tests__/opinionHeuristic.test.ts` — opinion-signal classification cases,
+  including (Cycle 6) rewatch/changed-opinion phrasing with no first-time sentiment word.
+- `src/lib/__tests__/recommendationHeuristic.test.ts` — (Cycle 6) recommendation-request
+  classification cases.
+- `src/lib/__tests__/titleClarificationHeuristic.test.ts` — recognizes the model's "don't
+  recognize ... movie" clarification phrasing, rejects unrelated replies.
 - `src/context/__tests__/AuthContext.test.tsx`, `src/features/auth/__tests__/AuthScreen.test.tsx`
   — sign-up/sign-in error surfacing, the email-confirmation branch.
 - `src/features/chat/__tests__/useChat.test.ts`, `ChatPanel.test.tsx` — history loading,
-  sending, footnote rendering, and (Cycle 4) the silent-retry loop (succeeds on a later
-  attempt / exhausts all 3 / never retries a malformed or unrecognized-title reply),
-  `<UPDATE>` insert-not-overwrite dispatch and its distinct footnote.
+  sending, footnote rendering, the silent-retry loop (succeeds on a later attempt /
+  exhausts all 3 / never retries a malformed or unrecognized-title reply), `<UPDATE>`
+  insert-not-overwrite dispatch and its distinct footnote, and (Cycle 6) the
+  want-to-watch `<ADD>` dispatch (null rating, `watchlist` footnote), the want-to-watch
+  → watched `<UPDATE>` transition, rewatch phrasing engaging the same retry-then-log
+  safety net, and `<RECOMMEND>` dispatch (display-only, `hasRatedItems`-gated
+  missing-recommendation logging).
+- `src/features/history/__tests__/useHistory.test.ts`, `HistoryPanel.test.tsx` — (Cycle 6)
+  initial load split into rated/watchlist (uncollapsed — multiple rows per title stay
+  separate), load-error handling, realtime INSERT events routed to the correct tab
+  without a manual refresh, channel cleanup on unmount, and the presentational
+  tab-switching/empty/loading/error states.
 - `src/__tests__/App.test.tsx` — auth gating (no session → `AuthScreen`; session →
   `ChatPanel` + sign-out), and a non-crashing fallback when history load fails.
 
 All Supabase calls are exercised against `src/test/mockSupabase.ts`, a minimal fake of
-the `.from(table).select/.eq/.order/.insert` surface this app actually uses — no live
+the `.from(table).select/.eq/.order/.insert` surface plus (Cycle 6)
+`.channel(...).on(...).subscribe()`/`removeChannel(...)` this app actually uses — no live
 Supabase project or network access is required to run the suite.
 
 ## Assumptions & decisions
@@ -458,3 +525,132 @@ written-summary deliverable and for a reviewer who only reads this file:
   and the off-by-one in the code comments is noted here rather than edited, since
   editing `chat.ts`'s comments falls outside this docs step's touch-only-what's-required
   scope and has no effect on behavior, tests, or the build.
+
+### Cycle 6 (PRD v7 — `<UPDATE>`-claimed-but-not-written bug fix, want-to-watch, live history panel)
+
+- **FR-008 (`<RECOMMEND>`) is finished in this cycle, not just amended.** This work
+  order's `change_log` lists FR-008 as "amended" (recommendation grounding must now
+  exclude want-to-watch rows), but code review at the start of this cycle confirmed —
+  again — that `<RECOMMEND>` had never actually been built in any of Cycles 3-5 despite
+  being carried forward as a documented gap each time (see "Cycle 3"/"Cycle 4"/"Cycle 5"
+  above). An amendment to a feature's grounding logic is meaningless if the feature
+  itself doesn't exist, so this cycle builds the whole tag (`RECOMMEND_TAG_DEFINITION` in
+  `tagParser.ts`, the "Recommendations" system-prompt clause, `fetchUserItemContext`'s
+  `recommendationMessage` in the edge function, display-only dispatch in `useChat.ts`,
+  and the `RecommendationCard` component) with the want-to-watch exclusion designed in
+  from the start, rather than shipping a no-op amendment to still-nonexistent code. This
+  is a build-step judgment call, not a silent scope guess: FR-008 was explicitly named in
+  this cycle's `change_log`, is a PRD `functional_requirements` entry with its own full
+  acceptance criteria (`priority: "should"`), and the PRD's own touch-only-what's-required
+  rule is about not opportunistically building *untouched* FRs — FR-008 was touched.
+- **`<RECOMMEND>` tag shape**: `<RECOMMEND item="..." reason="..." />`, matching the PRD's
+  `assumptions` entry for the shape (never confirmed by the dev beyond that assumption,
+  medium confidence, carried over unchanged from the original v3 change).
+- **Recommendation grounding is a second, separate server-side read result, not a filter
+  applied late.** `fetchUserItemContext` (renamed from `fetchExistingTitlesMessage`) reads
+  `items` once per request and builds two independent context messages: `titlesMessage`
+  (every status, for `<ADD>`-vs-`<UPDATE>` matching — a want-to-watch title still counts
+  as "already logged" so a later real opinion on it routes to `<UPDATE>`, not a fresh
+  `<ADD>`) and `recommendationMessage` (status `"watched"` + non-null `rating` only, via
+  `buildRecommendationContextMessage`). This directly satisfies both FR-009 (matching
+  must include watchlist titles) and this cycle's FR-008 amendment (grounding must
+  exclude them) from the same single read, rather than two separate queries.
+- **`requiredAttrs` became a function, not just a list, in `tagParser.ts`.** The PRD
+  requires a want-to-watch `<ADD>` to omit `rating` without being malformed, while a
+  normal `<ADD>` must still treat a missing `rating` as malformed (a pre-existing, tested
+  behavior). Rather than weakening `<ADD>`'s required-attributes check unconditionally
+  (which would silently accept `<ADD item="X" />` with no status as "valid, rating null"
+  — never asked for, and a real regression risk), `TagDefinition.requiredAttrs` can now
+  be a function of the tag's own raw attributes; `<ADD>`'s function returns `["item"]`
+  when `status="want_to_watch"` and `["item", "rating"]` otherwise. This keeps the
+  pre-existing "missing required attribute(s): rating" malformed-reason text intact for
+  every previously-tested case.
+- **`<UPDATE>` always writes `status: "watched"`, never inherits a status from anywhere
+  else.** An `<UPDATE>` is by definition a fresh, real opinion — including the
+  want-to-watch → watched transition (FR-009) — so there is no case where an `<UPDATE>`
+  insert should ever carry `status: "want_to_watch"`; this is hardcoded at the insert
+  call site in `useChat.ts` rather than threaded through the tag's own attributes.
+- **The opinion-heuristic extension is intentionally still a keyword/phrase list, not a
+  semantic classifier** — same documented tradeoff as the original heuristic. The dev's
+  reported bug (model says "I'll update your rating now" for a rewatch mention, nothing
+  lands in the database) was root-caused to this heuristic simply not having rewatch/
+  changed-opinion signals, not to a deeper architectural gap — the fix is additive
+  patterns (`rewatch(ed/ing)`, `changed my mind`, `opinion ... changed`, `reconsidered`,
+  `second viewing`, `actually loved/hated/...`) on the exact same list `<ADD>` misses
+  already used, so the *combination* of a correctly-firing heuristic plus the
+  pre-existing 3-attempt retry-then-fallback loop (Cycle 4) is the actual fix — no new
+  retry/fallback mechanism was needed, just closing the detection gap that kept it from
+  engaging.
+- **The action-integrity guard is a system-prompt instruction, not a code-level
+  enforcement mechanism.** There is no reliable way for the frontend to verify "does this
+  prose sentence assert an action" against "was a tag actually emitted" as a general
+  semantic check — that would require its own classifier with its own false-positive/
+  negative tradeoffs. Per the PRD's own framing ("jointly with FR-001/FR-004"), the real
+  fix is two-layered: (1) explicitly instruct the model never to claim an action without
+  the matching tag, and (2) make sure the opinion-heuristic reliably detects the phrasing
+  that should have produced a tag, so the existing retry-then-fallback safety net catches
+  a miss regardless of what the prose claims. Together these close the specific reported
+  defect (claim without a tag going completely unlogged) without inventing a new
+  prose-vs-tag consistency checker.
+- **`items.status`/`rating` nullability: additive migration, verified against the current
+  schema before writing it**, per the work order's explicit instruction to inspect
+  `rating`'s current constraint rather than assume. `002_items.sql` had `rating numeric
+  not null check (...)`; `006_items_status_and_realtime.sql` only drops the `not null`
+  (the existing range check already tolerated `NULL`) and adds `status text not null
+  default 'watched'` plus its own check constraint — no table/column drop, no rename, no
+  destructive `UPDATE`/`DELETE` anywhere in the file. Applied via `apply_client_migration`
+  and confirmed successful before any application code was written against it.
+- **Realtime is publication-based, not a bespoke websocket.** `items` is added to the
+  `supabase_realtime` publication (guarded by a `pg_publication_tables` existence check
+  so re-running the migration file would be a no-op rather than an error) so
+  `supabase-js`'s standard `channel(...).on("postgres_changes", ...)` API works
+  unmodified — no custom server-side push mechanism was built. RLS is what actually
+  scopes what a subscriber receives; the subscription's own `user_id=eq.<userId>` filter
+  is redundant-but-harmless defense in depth, matching every other per-user query in this
+  app.
+- **`hasRatedItems` is threaded from `useHistory` into `useChat`/`ChatPanel` as a plain
+  boolean prop, not re-derived independently.** Both features need to know "does this
+  user have at least one rated item" — `useHistory` already computes exactly that as
+  `ratedItems.length > 0` for FR-010, so `Home.tsx` passes it straight through rather than
+  having `useChat` run its own duplicate query. Consequence: the missing-`<RECOMMEND>`
+  classification is one render behind the absolute latest state in a pathological
+  race (rating something in the same instant as asking for a recommendation), which was
+  judged an acceptable tradeoff for a 2-3-tester proof-of-concept rather than justifying a
+  second live query.
+- **Recommendation card is a new small component (`RecommendationCard.tsx`), not another
+  `Badge` tone**, per the design step's own framing of FR-008/FR-005 as needing "a card or
+  badge" — a card because a recommendation carries a reason worth reading in full, not
+  just a short label like the existing footnote pills. It reuses the existing
+  `--color-accent`/`--color-accent-soft`/`--color-accent-text` tokens (the same ones the
+  `"update"` badge tone uses) rather than inventing new color tokens, so it reads as
+  "part of the same accent family" while still being visually distinct in *shape* (a
+  bordered block under the bubble, not an inline pill) from every footnote badge.
+- **`ChatPanel.tsx`'s per-message JSX gained one wrapping `<div className="chat-panel__turn">`**
+  around each `MessageBubble` (+ its optional `RecommendationCard`), because
+  `MessageBubble` itself was the direct flex child that `align-self` alignment depended
+  on — wrapping it without replicating that alignment on the new wrapper would have
+  broken user/assistant bubble alignment. `chat-panel__turn--user`/`--assistant` in
+  `ChatPanel.css` replicate the exact alignment `MessageBubble`'s own `.ui-message--*`
+  rules already provided, so this is a structural, non-visual change verified by the
+  pre-existing "write-confirmation badge" ChatPanel test still passing unmodified.
+- **One pre-existing test assertion was widened, not weakened.**
+  `tagParser.test.ts`'s very first case asserted `matches[0].attrs).toEqual({ item,
+  rating })` with no other keys; since `<ADD>` now always parses an explicit `status`
+  field (defaulting to `"watched"`), that exact-equality assertion now includes
+  `status: "watched"`. This is a necessary consequence of FR-003's own amendment (parse
+  an optional `status` attribute), not a masked regression — every other pre-existing
+  assertion in the file (and the rest of the suite) was left untouched and still passes.
+- **`App.test.tsx`'s history-load-failure test was made table-aware instead of
+  order-dependent.** Before this cycle, `Home` mounted exactly one `.from(...)` consumer
+  on mount (`useChat`'s chat-history load), so overriding "the first `.from()` call"
+  with `mockImplementationOnce` was an unambiguous way to simulate a failure. `Home` now
+  also mounts `useHistory` (a second, independent `.from("items")` consumer), and this
+  app doesn't guarantee — nor should a test assume — which of two sibling/parent effects
+  commits first. The test now keys its error builder off the table name
+  (`chat_messages` only) so it deterministically exercises the same "chat history failed
+  to load" path regardless of effect-firing order, rather than becoming flaky or
+  silently testing the wrong failure mode.
+- **No changes to `AuthScreen`, `AuthContext`, `profiles`/`chat_messages` schema, the
+  recolor, or any FR-002/FR-006/FR-007 behavior** — confirmed by diff review; this
+  cycle's `change_log` doesn't touch any of them and none needed to change to support
+  the additions above.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildExistingTitlesMessage, SYSTEM_PROMPT } from "../systemPrompt";
+import { buildExistingTitlesMessage, buildRecommendationContextMessage, SYSTEM_PROMPT } from "../systemPrompt";
 
 describe("SYSTEM_PROMPT (FR-001 AC3: reviewable in the repo)", () => {
   it("documents the <ADD> tag format", () => {
@@ -35,6 +35,57 @@ describe("SYSTEM_PROMPT (FR-001 AC3: reviewable in the repo)", () => {
 
   it("caps tag emission to at most one of <ADD> or <UPDATE> per reply", () => {
     expect(SYSTEM_PROMPT).toMatch(/never both/i);
+  });
+
+  it("documents the want-to-watch <ADD status=\"want_to_watch\" /> variant with rating omitted (Cycle 6 / FR-001)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/status="want_to_watch"/);
+    expect(SYSTEM_PROMPT).toMatch(/leave the rating attribute out/i);
+  });
+
+  it("documents the on-request <RECOMMEND> tag, grounded and non-proactive (Cycle 6 / FR-008)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/<RECOMMEND item="[^"]*" reason="[^"]*" \/>/);
+    expect(SYSTEM_PROMPT).toMatch(/never insert a recommendation.*unprompted/i);
+  });
+
+  it("instructs the model not to fabricate a recommendation when the user has no rated items", () => {
+    expect(SYSTEM_PROMPT).toMatch(/do not\s+fabricate a personalized pick/i);
+  });
+
+  it("documents the action-integrity guard (Cycle 6 bug fix)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/action-integrity guard/i);
+    expect(SYSTEM_PROMPT).toMatch(/never say.*that you are logging, saving, updating, or/i);
+    expect(SYSTEM_PROMPT).toMatch(/changing a rating/i);
+  });
+});
+
+describe("buildRecommendationContextMessage (Cycle 6 / FR-008: recommendation grounding)", () => {
+  it("returns null when the user has no rated items yet", () => {
+    expect(buildRecommendationContextMessage([])).toBeNull();
+  });
+
+  it("lists the user's rated titles with their ratings for the model to ground a <RECOMMEND> in", () => {
+    const message = buildRecommendationContextMessage([
+      { item: "Inception", rating: 5 },
+      { item: "Tenet", rating: 4 },
+    ]);
+    expect(message).toMatch(/"Inception" \(5\/5\)/);
+    expect(message).toMatch(/"Tenet" \(4\/5\)/);
+  });
+
+  it("de-duplicates repeated titles, keeping the first (most recent) occurrence", () => {
+    const message = buildRecommendationContextMessage([
+      { item: "Inception", rating: 2 },
+      { item: "inception", rating: 5 },
+    ]);
+    const occurrences = message?.match(/"[Ii]nception"/g) ?? [];
+    expect(occurrences).toHaveLength(1);
+    expect(message).toMatch(/\(2\/5\)/);
+  });
+
+  it("ignores rows with a null/non-finite rating (want-to-watch entries never ground a recommendation)", () => {
+    expect(
+      buildRecommendationContextMessage([{ item: "Dune", rating: null as unknown as number }]),
+    ).toBeNull();
   });
 });
 
