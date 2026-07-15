@@ -193,7 +193,7 @@ isolation or integrity benefit.
 | FR-004 | Graceful failure (malformed/missing/ambiguous/off-topic, no silent failure) + Cycle 4 silent-retry + unrecognized-title logging | `src/features/chat/useChat.ts` (`runAttempt`/retry loop, all branches) + `src/lib/opinionHeuristic.ts` (missing-vs-ordinary-chat classifier) + `src/lib/titleClarificationHeuristic.ts` (unrecognized-title classifier, Cycle 4) + `parse_failures` table (`reason` now includes `unrecognized_title`, `supabase/migrations/005_...sql`) |
 | FR-005 | Clean minimal chat UI with write confirmation + distinct "rating updated" badge | `src/features/chat/ChatPanel.tsx` (streaming caret via `MessageBubble`'s `streaming` prop, `Badge` footnote for confirmation/failure) + `src/components/ui/` (`Badge` gains `tone="update"`, Cycle 4 / FR-009 — distinct accent-soft styling from `success`/`danger`/`neutral`) + `src/components/layout/AppShell.tsx` |
 | FR-006 | Email/password auth, persisted chat, per-user isolation | `src/context/AuthContext.tsx`, `src/features/auth/AuthScreen.tsx`, RLS policies in all `supabase/migrations/*.sql` files (unchanged this cycle; the Cycle-4 `<UPDATE>` insert and titles-read both reuse existing `items` RLS policies, no new policy needed) |
-| FR-007 | Netlify deployment + deliverables | `netlify.toml` (build command + SPA publish dir), `public/_redirects` (SPA fallback routing); the actual deploy, repo link, and written summary are produced by this pipeline's later (docs/deploy) step, not by app code |
+| FR-007 | Netlify deployment + deliverables, incl. Cycle 5's edge-function build/deploy fix | `netlify.toml` (build command + SPA publish dir), `public/_redirects` (SPA fallback routing); the actual deploy, repo link, and written summary are produced by this pipeline's later (docs/deploy) step, not by app code. Cycle 5: `netlify/edge-functions/chat.ts`'s `@supabase/supabase-js` import moved from an `npm:` specifier to a Deno-native `https://esm.sh/@supabase/supabase-js@2.110.3` ESM URL to unblock Netlify's edge bundler; locked in by `netlify/edge-functions/__tests__/chat.imports.test.ts` |
 | FR-008 | Personalized, on-request `<RECOMMEND>` tag | **Still not implemented.** `createDefaultTagRegistry()` (`src/lib/tagParser.ts`) registers `ADD_TAG_DEFINITION` and `UPDATE_TAG_DEFINITION` only; there is no `RECOMMEND` tag definition, no system-prompt clause conditioning its emission, and no distinct-card rendering anywhere in `src/`. This cycle's change_log scopes only FR-001/003/004/009, so per the touch-only-what's-required rule this pre-existing (Cycle 3) gap was carried forward rather than opportunistically built. See "Assumptions & decisions → Cycle 3" and "→ Cycle 4" below. |
 | FR-009 | `<UPDATE>` as a third inline tag type: model-side fuzzy re-mention matching, insert-with-history, distinct "rating updated" badge | `src/lib/systemPrompt.ts` (`buildExistingTitlesMessage` + ADD-vs-UPDATE prompt rules) + `netlify/edge-functions/chat.ts` (`fetchExistingTitlesMessage`, RLS-scoped per-request read of the caller's own titles) + `src/lib/tagParser.ts` (`UPDATE_TAG_DEFINITION`) + `src/features/chat/useChat.ts` (insert dispatch + `tone="update"` footnote) + `src/components/ui/Badge.tsx` (`"update"` tone) |
 
@@ -405,3 +405,56 @@ written-summary deliverable and for a reviewer who only reads this file:
   OpenAI's HTTP contract; the model's actual comparative rating inference and its
   live fuzzy-matching judgment are marked `not_verifiable` in `qa-evidence/report.json`
   for that reason, not because the code path was untested.
+
+### Cycle 5 (PRD v6 — Netlify edge-function build/deploy fix, FR-007 only)
+
+- **Root cause: a platform-support gap, not an app-logic bug.** The already-signed-off
+  Cycle-4 code imported `@supabase/supabase-js` in `netlify/edge-functions/chat.ts` via
+  an `npm:` specifier (`npm:@supabase/supabase-js@2.110.3`). Netlify's Deno-based edge
+  bundler only experimentally supports `npm:` specifiers and failed to bundle it,
+  breaking the deploy. This was confirmed (per the dev's own framing in this cycle's
+  change conversation) to be "the platform changed under us," not a regression
+  introduced by prior app-logic changes — no other code in the diff needed review.
+- **Fix direction: swap the import target, don't change the function's shape.** Per the
+  dev's explicit choice of option (a) over moving the function to a Node.js serverless
+  function, `chat.ts` stays a Netlify Edge Function; only the one import line changed,
+  from `npm:@supabase/supabase-js@2.110.3` to the Deno-native
+  `https://esm.sh/@supabase/supabase-js@2.110.3`. esm.sh serves the same published npm
+  package as a Deno-compatible ES module, so this is a build-target swap, not a
+  dependency or behavior change.
+- **Version pin: `2.110.3`, matching `package.json` exactly, to avoid an unreviewed
+  dependency bump.** The migration notes and the dev's own instruction ("pinned to
+  2.110.3 or nearest stable") ruled out an unpinned `@2` import; the pin is enforced by
+  `netlify/edge-functions/__tests__/chat.imports.test.ts`, which reads both the source
+  file and `package.json` and fails if the two versions ever drift apart.
+- **No other import in the file needed the same treatment.** The interviewer's
+  instruction was to flag any other `npm:`-specifier import in `chat.ts` for the same
+  fix; the file's other two imports (`../../src/lib/openaiRequest.ts`,
+  `../../src/lib/systemPrompt.ts`) are plain relative paths to Deno-free TypeScript
+  modules and were already unaffected. Confirmed by
+  `chat.imports.test.ts`'s "only the @supabase/supabase-js import was moved off npm"
+  assertion, which counts the file's import lines and asserts exactly one `esm.sh`
+  import and two `src/lib/` imports — no more, no less.
+- **No file under `src/`, no schema, and no other part of `chat.ts` changed.** This
+  cycle's `change_log` entry names FR-007 only ("no behavior, streaming shape, tag
+  emission/parsing, or DB writes change"), so per the touch-only-what's-required rule
+  the fix is scoped to the single import line plus its explanatory comment and the new
+  regression test — confirmed by `git diff` against the prior cycle's commit showing
+  exactly that. `npm run build` (`tsc --noEmit && vite build`) passes unchanged; the
+  edge function itself is outside that compilation graph (Netlify's edge bundler builds
+  it separately at deploy time), so `chat.imports.test.ts`'s static source-text
+  assertions are what gives this fix unit-test coverage without a Deno runtime.
+- **FR-008 (`<RECOMMEND>`) still remains unimplemented — carried forward a third
+  cycle, not silently dropped and not opportunistically built here either.** This
+  cycle's `change_log` entry scopes only FR-007; FR-008 is untouched. Confirmed again
+  by code review: `createDefaultTagRegistry()` (`src/lib/tagParser.ts`) still registers
+  `ADD` and `UPDATE` only. See "Cycle 3" and "Cycle 4" above — a future cycle's work
+  order should explicitly decide whether to reopen FR-008.
+- **Documentation-only nit, not corrected in code this cycle:** the new test file's and
+  `chat.ts`'s own inline comments label this fix "Cycle 6," one ahead of this document's
+  own Cycle-3-was-PRD-v4 / Cycle-4-was-PRD-v5 numbering (which makes this cycle
+  "Cycle 5," matching PRD v6). The two numbering schemes describe the same change; this
+  file's numbering is treated as authoritative for the client-facing written summary,
+  and the off-by-one in the code comments is noted here rather than edited, since
+  editing `chat.ts`'s comments falls outside this docs step's touch-only-what's-required
+  scope and has no effect on behavior, tests, or the build.

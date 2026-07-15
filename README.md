@@ -73,7 +73,21 @@ supabase/migrations/             schema + RLS policies, in apply order
 docs/ARCHITECTURE.md             data model, auth model, FR map, assumptions & decisions
 ```
 
-## Current status (Cycle 4 / PRD v5)
+## Current status (Cycle 5 / PRD v6)
+
+This cycle was a **build/deploy fix only, no behavior change**: the Netlify Edge
+Function at `netlify/edge-functions/chat.ts` imported `@supabase/supabase-js` via an
+`npm:` specifier, which Netlify's edge bundler (Deno-based, experimental npm-module
+support) failed to bundle. The import was swapped to a Deno-native ESM URL —
+`https://esm.sh/@supabase/supabase-js@2.110.3` — pinned to the exact same version
+already in `package.json`'s `dependencies`, so this is a build-target swap, not a
+dependency/version bump. Nothing else in the file, and no file under `src/`, changed.
+A new regression test, `netlify/edge-functions/__tests__/chat.imports.test.ts`,
+statically asserts the file imports from an `esm.sh` URL, contains no `npm:` specifier
+anywhere, and stays pinned to the same version as `package.json` — so a future
+edit can't silently reintroduce the bundler-breaking import.
+
+### Previously (Cycle 4 / PRD v5)
 
 The theme's primary accent is `#A0B9BF` (soft slate blue) applied uniformly across
 buttons, message bubbles, badges, links/focus rings, and the auth screen (`src/styles/theme.css`).
