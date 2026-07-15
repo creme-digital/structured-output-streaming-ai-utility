@@ -101,6 +101,12 @@ user's message is accepted and again once the assistant's stream finishes. This 
 makes chat history persist across logout/login (FR-006) — `useChat`'s history-load effect
 reads this table filtered to the signed-in user on mount.
 
+Since Cycle 7, assistant rows carry two forms of the same turn: `content` (the cleaned,
+tag-stripped display text, unchanged from before) and `raw_content` (the model-visible
+form — the raw output with its tags intact, or `NULL` meaning "never replay this turn to
+the model": compliance misses, malformed-tag turns, and every pre-Cycle-7 row). See the
+Cycle 7 section below for the live-site poisoning incident that forced this split.
+
 ### `parse_failures`
 Written whenever `useChat.ts` can't turn a model turn into either a clean chat message or
 a saved item: malformed tag, missing tag on what looked like a loggable opinion (after the
@@ -654,3 +660,46 @@ written-summary deliverable and for a reviewer who only reads this file:
   recolor, or any FR-002/FR-006/FR-007 behavior** — confirmed by diff review; this
   cycle's `change_log` doesn't touch any of them and none needed to change to support
   the additions above.
+
+### Cycle 7 (live-site incident — self-reinforcing history poisoning, missed-watchlist visibility, title-insistence)
+
+This cycle was driven by a production bug report ("the watchlist did not save and none
+of the updated ones are saving") rather than a PRD work order. Root cause, reproduced
+against the live site by replaying the affected user's exact persisted history through
+`/api/chat`:
+
+- **The app was poisoning its own model context.** Assistant replies are persisted with
+  their tags stripped (correct for display), but that same cleaned text was also what
+  `useChat` sent back to the model as conversation history. After one stochastic
+  compliance miss (a prose claim like "I'll update your rating for that movie now." with
+  no tag — which the Cycle 6 action-integrity guard reduces but cannot eliminate), the
+  persisted tag-less claim becomes few-shot evidence that tags are optional, and the
+  model reliably stops emitting them for the remainder of that conversation. A clean
+  context tagged correctly in every probe; the poisoned history failed in every probe.
+  The 3-attempt retry loop cannot help, because every retry replays the same poisoned
+  history.
+- **Fix: the model now sees its own past turns raw.** `chat_messages.raw_content`
+  (`007_chat_messages_raw_content.sql`, additive-only) stores the model-visible form of
+  each assistant turn. `historyForModel` sends `raw_content` for assistant turns and
+  drops any assistant turn without one — compliance misses, malformed-tag turns (whose
+  broken syntax must not be taught back), and all legacy rows, which instantly detoxes
+  every conversation poisoned before the fix shipped. Display behavior is unchanged
+  (`content` remains cleaned); a dropped assistant turn just leaves its user turn
+  standing alone in model history, which probing showed is harmless.
+- **Missed want-to-watch adds were completely invisible.** "I want to watch Toy Story"
+  answered with a tag-less prose claim produced no retry, no `parse_failures` row, and
+  no footnote: neither the opinion nor the recommendation heuristic fires on a watch
+  intent, so `missKind` stayed null and the miss was indistinguishable from chit-chat.
+  `watchlistHeuristic.ts` closes the gap — a clear watch intent now gets the same
+  2-retry-then-log-`missing` discipline as a missed `<ADD>`/`<UPDATE>`, plus its own
+  neutral "Didn't catch a watchlist add there." footnote, and (like every compliance
+  miss) persists with `raw_content = NULL`.
+- **Prompt hardening, two clauses.** The action-integrity guard now states that history
+  is not a formatting example (defense in depth for any tag-less turn that still slips
+  into context), and the unrecognized-title rule now tells the model to accept a title
+  the user insists is real or supports with detail (actor/director/year) after one
+  clarifying question — on the live site it refused "Norbit" (a real 2007 film) twice,
+  even after the user named the lead actor.
+- **Everything else untouched** — no changes to the edge function, `items` schema, RLS,
+  tag parser, or any FR-002/FR-006/FR-007/FR-008 behavior; `parse_failures.reason`
+  reuses `missing` for watchlist misses rather than widening the check constraint.

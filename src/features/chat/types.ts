@@ -23,4 +23,14 @@ export interface ChatUiMessage {
   status: MessageStatus;
   footnote?: FootnoteInfo;
   recommendation?: RecommendationInfo;
+  /**
+   * Cycle 7 (history-poisoning fix): for assistant turns, the model-visible form of
+   * this message — the raw output with its <ADD>/<UPDATE>/<RECOMMEND> tags intact —
+   * mirroring `chat_messages.raw_content`. `undefined` means this assistant turn must
+   * be EXCLUDED from the history sent back to the model: compliance misses and
+   * malformed-tag turns (whose tag-less prose claims would otherwise teach the model
+   * that tags are optional), and legacy rows persisted before raw output was stored.
+   * Unused on user turns (`content` is always the model-visible form there).
+   */
+  modelContent?: string;
 }

@@ -14,7 +14,12 @@
  *    written" bug the dev reported), the want-to-watch `<ADD status="want_to_watch" />`
  *    variant (FR-001/FR-003), and the on-request `<RECOMMEND item="..." reason="..." />`
  *    tag (FR-008, finished this cycle — see docs/ARCHITECTURE.md for why it had been
- *    carried forward unbuilt for three prior cycles), and
+ *    carried forward unbuilt for three prior cycles),
+ *  - Cycle 7 additions: a history-is-not-a-precedent note in the action-integrity
+ *    guard (tag-stripped history was teaching the model that tags are optional — the
+ *    self-reinforcing poisoning bug reproduced on the live site) and an
+ *    accept-on-insistence rule for unrecognized titles (the model twice refused
+ *    "Norbit", a real film, even after the user supplied the lead actor), and
  *  - basic conversational safeguards for off-topic / adversarial input (FR-004).
  *
  * Kept as one reviewable constant, imported by both the edge function (server-side
@@ -81,6 +86,13 @@ knowledge-based judgment only; you have no external lookup, so you will occasion
 wrong about obscure-but-real or very new titles — that's an accepted limitation, not
 something to apologize for at length.
 
+If, after you have asked once, the user pushes back and confirms the title is real or
+supplies corroborating detail (an actor, director, year, or a corrected spelling),
+take their word for it: treat the title as real and proceed with the normal
+<ADD>/<UPDATE> rules using the user's title, rather than refusing a second time. The
+user knows what they watched; your recognition check exists to catch typos, not to
+overrule them.
+
 ## Want to watch — a future intent, not an opinion
 
 If the user says they WANT to watch a title in the future rather than expressing an
@@ -141,6 +153,13 @@ ambiguous re-mention, anything that gives you pause — do not claim the action 
 in your prose either; just respond conversationally (ask a clarifying question, or
 simply discuss the movie) without asserting a change that didn't occur. A prose claim
 of an action must never exist without its matching tag in the same turn.
+
+The conversation history you are shown is NOT a formatting example: the app may store
+or display earlier replies with their tags removed, so an earlier reply of yours that
+appears to claim a log or update without a visible tag is an artifact of storage (or a
+past failure), never a precedent. Do not infer from history that tags are optional —
+every new reply that qualifies under the rules above must include its tag, no matter
+what earlier turns look like.
 
 ## Conversational safeguards
 

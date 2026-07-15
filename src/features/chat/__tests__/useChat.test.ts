@@ -517,6 +517,176 @@ describe("useChat — <RECOMMEND> as a fourth registered, display-only tag type 
   });
 });
 
+describe("useChat — model history uses raw (tag-inclusive) content (Cycle 7: history-poisoning fix)", () => {
+  /** Parses the JSON body of the nth fetch call to /api/chat. */
+  function fetchBody(fetchMock: ReturnType<typeof vi.fn>, call = 0): { messages: Array<{ role: string; content: string }> } {
+    const init = fetchMock.mock.calls[call][1] as RequestInit;
+    return JSON.parse(init.body as string);
+  }
+
+  it("persists the assistant's raw output (tags intact) as raw_content alongside the cleaned display text", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(streamingResponse('Great pick! <ADD item="Inception" rating="5" />'))),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I loved Inception");
+    });
+
+    const assistantInsert = fakeSupabase.insertCalls.find(
+      (c) => c.table === "chat_messages" && c.payload.role === "assistant",
+    );
+    // Display text stays cleaned; the model-visible form keeps the tag.
+    expect(assistantInsert?.payload.content).toBe("Great pick!");
+    expect(assistantInsert?.payload.raw_content).toBe('Great pick! <ADD item="Inception" rating="5" />');
+  });
+
+  it("persists raw_content: null for a compliance miss so the tag-less claim is never replayed to the model", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(streamingResponse("I'll update your rating for that movie now."))),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I loved Inception");
+    });
+
+    const assistantInsert = fakeSupabase.insertCalls.find(
+      (c) => c.table === "chat_messages" && c.payload.role === "assistant",
+    );
+    expect(assistantInsert?.payload.raw_content).toBeNull();
+  });
+
+  it("sends the model its own prior reply WITH the tag, not the cleaned display text", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() =>
+        Promise.resolve(streamingResponse('Great pick! <ADD item="Inception" rating="5" />')),
+      )
+      .mockImplementationOnce(() =>
+        Promise.resolve(streamingResponse('Noted! <UPDATE item="Inception" rating="2" />')),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I loved Inception");
+    });
+    await act(async () => {
+      await result.current.sendMessage("Actually, Inception was worse on rewatch");
+    });
+
+    const secondBody = fetchBody(fetchMock, 1);
+    const assistantTurns = secondBody.messages.filter((m) => m.role === "assistant");
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0].content).toBe('Great pick! <ADD item="Inception" rating="5" />');
+  });
+
+  it("excludes an in-session compliance miss from the history sent on the next turn", async () => {
+    const fetchMock = vi
+      .fn()
+      // Turn 1: 3 tag-less attempts against an opinion -> no_tag_final compliance miss.
+      .mockImplementationOnce(() => Promise.resolve(streamingResponse("I'll update your rating now.")))
+      .mockImplementationOnce(() => Promise.resolve(streamingResponse("I'll update your rating now.")))
+      .mockImplementationOnce(() => Promise.resolve(streamingResponse("I'll update your rating now.")))
+      // Turn 2.
+      .mockImplementationOnce(() =>
+        Promise.resolve(streamingResponse('Got it! <ADD item="Dune" rating="5" />')),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I loved Inception");
+    });
+    await act(async () => {
+      await result.current.sendMessage("I loved Dune");
+    });
+
+    const secondTurnBody = fetchBody(fetchMock, 3);
+    // The poisoned reply is displayed to the user but never shown to the model again;
+    // both user turns survive.
+    expect(secondTurnBody.messages.filter((m) => m.role === "assistant")).toHaveLength(0);
+    expect(secondTurnBody.messages.filter((m) => m.role === "user")).toHaveLength(2);
+    expect(result.current.messages.find((m) => m.role === "assistant")?.content).toBe(
+      "I'll update your rating now.",
+    );
+  });
+
+  it("excludes legacy persisted assistant rows (raw_content null) from model history while still displaying them", async () => {
+    fakeSupabase = createFakeSupabaseTables({
+      historyRows: [
+        { id: "1", role: "user", content: "I loved Inception" },
+        // Legacy pre-Cycle-7 row: cleaned text only — potentially a poisoned claim.
+        { id: "2", role: "assistant", content: "I'll update your rating now.", raw_content: null },
+        { id: "3", role: "user", content: "I loved Dune" },
+        // Post-fix row: raw form persisted, tag intact.
+        { id: "4", role: "assistant", content: "Got it!", raw_content: 'Got it! <ADD item="Dune" rating="5" />' },
+      ],
+    });
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(streamingResponse('Nice! <ADD item="Tenet" rating="4" />')),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+    expect(result.current.messages).toHaveLength(4);
+
+    await act(async () => {
+      await result.current.sendMessage("I liked Tenet");
+    });
+
+    const body = fetchBody(fetchMock);
+    const assistantTurns = body.messages.filter((m) => m.role === "assistant");
+    expect(assistantTurns).toHaveLength(1);
+    expect(assistantTurns[0].content).toBe('Got it! <ADD item="Dune" rating="5" />');
+  });
+});
+
+describe("useChat — missed want-to-watch <ADD> gets the retry-then-log safety net (Cycle 7)", () => {
+  it("retries a watch intent that produced no tag, then falls back, logs 'missing', and shows a distinct footnote", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(streamingResponse("I'll add that to your want-to-watch list!")),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I want to watch Toy Story");
+    });
+
+    // Previously this was completely invisible: no opinion/recommendation signal fired,
+    // so the claimed-but-unemitted watchlist add produced no retry, no log, no footnote.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      fakeSupabase.insertCalls.some((c) => c.table === "parse_failures" && c.payload.reason === "missing"),
+    ).toBe(true);
+    expect(result.current.messages[1].footnote).toEqual({
+      tone: "neutral",
+      text: "Didn't catch a watchlist add there.",
+    });
+    // And, like every compliance miss, it must not poison future model history.
+    const assistantInsert = fakeSupabase.insertCalls.find(
+      (c) => c.table === "chat_messages" && c.payload.role === "assistant",
+    );
+    expect(assistantInsert?.payload.raw_content).toBeNull();
+  });
+});
+
 describe("useChat — unrecognized-title clarification (Cycle 4 / FR-001 Issue 2, FR-004)", () => {
   it("logs 'unrecognized_title' and does not retry when the model asks for clarification", async () => {
     const fetchMock = vi.fn(() =>

@@ -12,6 +12,7 @@ import {
 } from "../../lib/tagParser";
 import { looksLikeLoggableOpinion } from "../../lib/opinionHeuristic";
 import { looksLikeRecommendationRequest } from "../../lib/recommendationHeuristic";
+import { looksLikeWatchlistIntent } from "../../lib/watchlistHeuristic";
 import { looksLikeUnrecognizedTitleClarification } from "../../lib/titleClarificationHeuristic";
 import { ChatUiMessage, FootnoteInfo } from "./types";
 
@@ -39,7 +40,12 @@ type AttemptOutcome =
   | { kind: "malformed"; extract: ExtractResult; rawBuffer: string; finalDisplay: string }
   | { kind: "unrecognized_title"; rawBuffer: string; finalDisplay: string }
   | { kind: "no_tag_retryable"; rawBuffer: string }
-  | { kind: "no_tag_final"; rawBuffer: string; finalDisplay: string; missKind: "opinion" | "recommendation" | null }
+  | {
+      kind: "no_tag_final";
+      rawBuffer: string;
+      finalDisplay: string;
+      missKind: "opinion" | "watchlist" | "recommendation" | null;
+    }
   | { kind: "empty"; rawBuffer: string }
   | { kind: "http_error"; detail: string };
 
@@ -74,7 +80,7 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
       setHistoryStatus("loading");
       const { data, error } = await supabase
         .from("chat_messages")
-        .select("id, role, content")
+        .select("id, role, content, raw_content")
         .eq("user_id", userId)
         .order("created_at", { ascending: true });
 
@@ -90,6 +96,9 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
           role: row.role as "user" | "assistant",
           content: row.content as string,
           status: "done" as const,
+          // null raw_content (compliance miss, or a legacy pre-Cycle-7 row) maps to
+          // undefined: displayed normally, but excluded from model history below.
+          modelContent: (row as { raw_content?: string | null }).raw_content ?? undefined,
         })),
       );
       setHistoryStatus("ready");
@@ -156,9 +165,17 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
         return;
       }
 
+      // Cycle 7 (history-poisoning fix): the model must see its own past replies WITH
+      // their tags (raw output), never the tag-stripped display text — one persisted
+      // tag-less "I'll update your rating now" claim is enough few-shot evidence to
+      // make the model stop emitting tags for the rest of the conversation (reproduced
+      // live; see docs/ARCHITECTURE.md, Cycle 7). Assistant turns with no model-visible
+      // form (compliance misses, malformed turns, legacy rows) are dropped entirely —
+      // a user turn with no assistant reply is harmless, a poisoned reply is not.
       const historyForModel = [...messagesRef.current, userMessage]
         .filter((m) => m.status !== "error")
-        .map((m) => ({ role: m.role, content: m.content }));
+        .filter((m) => m.role === "user" || m.modelContent !== undefined)
+        .map((m) => ({ role: m.role, content: m.role === "user" ? m.content : m.modelContent! }));
 
       // Tracks the most recently-seen partial buffer across attempts so the top-level
       // catch below can still log *something* useful if an exception interrupts an
@@ -253,8 +270,14 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
 
           if (attemptOutcome.kind === "no_tag_retryable") {
             const opinionLikely = looksLikeLoggableOpinion(trimmed);
+            // Cycle 7: a clear watch-intent ("I want to watch Toy Story") whose reply
+            // carries no <ADD status="want_to_watch" /> gets the same silent-retry
+            // safety net as a missed opinion — before this it was completely invisible
+            // (no retry, no log, no footnote; found via the live history-poisoning
+            // incident, where the model claimed the watchlist add in prose).
+            const watchlistLikely = looksLikeWatchlistIntent(trimmed);
             const attemptsRemain = attempt < MAX_ATTEMPTS;
-            if (opinionLikely && attemptsRemain) {
+            if ((opinionLikely || watchlistLikely) && attemptsRemain) {
               continue; // silent retry (FR-004 Issue 1, extended in Cycle 6 to also
               // cover rewatch/changed-opinion phrasing) — loop again
             }
@@ -271,7 +294,13 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
               finalDisplay: stripTrailingPartialTag(
                 extractTags(attemptOutcome.rawBuffer, registryRef.current).cleanedText,
               ).trim(),
-              missKind: opinionLikely ? "opinion" : recommendationLikely ? "recommendation" : null,
+              missKind: opinionLikely
+                ? "opinion"
+                : watchlistLikely
+                  ? "watchlist"
+                  : recommendationLikely
+                    ? "recommendation"
+                    : null,
             };
             break;
           }
@@ -303,6 +332,8 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
 
           case "malformed": {
             await logParseFailure(outcome.rawBuffer, "malformed");
+            // Cycle 7: deliberately no modelContent — replaying a broken tag back to
+            // the model as history would teach it the broken syntax.
             updateMessage(assistantId, {
               status: "done",
               content: outcome.finalDisplay,
@@ -315,8 +346,13 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
             // Expected, non-failure behavior (FR-001 Issue 2) — the model correctly
             // declined to guess at a title it doesn't recognize. Still logged for
             // visibility/analytics (FR-004), but not surfaced as an error to the user.
+            // A legitimate tag-less reply, so it stays model-visible (Cycle 7).
             await logParseFailure(outcome.rawBuffer, "unrecognized_title");
-            updateMessage(assistantId, { status: "done", content: outcome.finalDisplay });
+            updateMessage(assistantId, {
+              status: "done",
+              content: outcome.finalDisplay,
+              modelContent: outcome.rawBuffer,
+            });
             break;
           }
 
@@ -327,10 +363,21 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
             const footnote: FootnoteInfo | undefined =
               outcome.missKind === "opinion"
                 ? { tone: "neutral", text: "Didn't catch an item to log there." }
-                : outcome.missKind === "recommendation"
-                  ? { tone: "neutral", text: "Didn't catch a recommendation there." }
-                  : undefined;
-            updateMessage(assistantId, { status: "done", content: outcome.finalDisplay, footnote });
+                : outcome.missKind === "watchlist"
+                  ? { tone: "neutral", text: "Didn't catch a watchlist add there." }
+                  : outcome.missKind === "recommendation"
+                    ? { tone: "neutral", text: "Didn't catch a recommendation there." }
+                    : undefined;
+            // Cycle 7: a compliance miss (missKind set) is displayed but NEVER shown
+            // back to the model — its tag-less prose claim is exactly the poison that
+            // caused the self-reinforcing history bug. An ordinary conversational
+            // reply (missKind null) is a legitimate tag-less turn and stays visible.
+            updateMessage(assistantId, {
+              status: "done",
+              content: outcome.finalDisplay,
+              footnote,
+              modelContent: outcome.missKind === null ? outcome.rawBuffer : undefined,
+            });
             break;
           }
 
@@ -421,6 +468,7 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
               content: outcome.finalDisplay,
               footnote,
               recommendation,
+              modelContent: outcome.rawBuffer,
             });
             break;
           }
@@ -434,9 +482,22 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
               : undefined;
 
         if (persistedContent !== undefined) {
-          const { error: assistantInsertError } = await supabase
-            .from("chat_messages")
-            .insert({ user_id: userId, role: "assistant", content: persistedContent });
+          // Cycle 7: persist the model-visible form alongside the cleaned display text,
+          // mirroring the modelContent rules applied to the in-session message above —
+          // raw output (tags intact) for healthy turns, NULL for compliance misses and
+          // malformed turns so they are never replayed to the model as history.
+          const persistedRawContent =
+            outcome.kind === "success" ||
+            outcome.kind === "unrecognized_title" ||
+            (outcome.kind === "no_tag_final" && outcome.missKind === null)
+              ? outcome.rawBuffer
+              : null;
+          const { error: assistantInsertError } = await supabase.from("chat_messages").insert({
+            user_id: userId,
+            role: "assistant",
+            content: persistedContent,
+            raw_content: persistedRawContent,
+          });
           if (assistantInsertError) {
             console.error("Failed to persist assistant message:", assistantInsertError.message);
           }

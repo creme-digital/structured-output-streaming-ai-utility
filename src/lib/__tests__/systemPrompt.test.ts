@@ -56,6 +56,17 @@ describe("SYSTEM_PROMPT (FR-001 AC3: reviewable in the repo)", () => {
     expect(SYSTEM_PROMPT).toMatch(/never say.*that you are logging, saving, updating, or/i);
     expect(SYSTEM_PROMPT).toMatch(/changing a rating/i);
   });
+
+  it("tells the model tag-stripped history is never a precedent for omitting tags (Cycle 7: history-poisoning fix)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/history.*not a formatting example/i);
+    expect(SYSTEM_PROMPT).toMatch(/do not infer from history that tags are optional/i);
+  });
+
+  it("tells the model to accept a title the user insists is real after one clarifying question (Cycle 7)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/pushes back and confirms the title is real/i);
+    expect(SYSTEM_PROMPT).toMatch(/actor, director, year/i);
+    expect(SYSTEM_PROMPT).toMatch(/rather than refusing a second time/i);
+  });
 });
 
 describe("buildRecommendationContextMessage (Cycle 6 / FR-008: recommendation grounding)", () => {
