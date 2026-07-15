@@ -11,9 +11,13 @@
 
 import { buildOpenAIRequestBody, ChatTurn } from "../../src/lib/openaiRequest.ts";
 import { buildExistingTitlesMessage, SYSTEM_PROMPT } from "../../src/lib/systemPrompt.ts";
-// Deno-only dependency (npm compatibility layer) — kept out of src/lib so every other
-// module stays plain, Deno-free TypeScript that vitest can run under Node/jsdom.
-import { createClient } from "npm:@supabase/supabase-js@2.110.3";
+// Deno-native ESM import (cycle 6 / FR-007 build fix) — kept out of src/lib so every
+// other module stays plain, Deno-free TypeScript that vitest can run under Node/jsdom.
+// Netlify's edge bundler only experimentally supports npm: specifiers and fails to
+// bundle them reliably; esm.sh serves the same published package as a Deno-native ESM
+// module, so this is a build-target swap only, not a dependency/version change. Pinned
+// to the same 2.110.3 used by package.json to avoid an unreviewed version bump.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.110.3";
 
 declare const Deno: { env: { get(key: string): string | undefined } };
 

@@ -1,0 +1,25 @@
+{
+  "client_supabase_ref": "wbqispcdjvakgdqqcqik",
+  "cycle": 5,
+  "taken_at": "2026-07-15T17-41-08-647Z",
+  "tables": [
+    {
+      "table": "chat_messages",
+      "rows": 149
+    },
+    {
+      "table": "items",
+      "rows": 32
+    },
+    {
+      "table": "parse_failures",
+      "rows": 22
+    },
+    {
+      "table": "profiles",
+      "rows": 22
+    }
+  ],
+  "skipped": [],
+  "restore_note": "Each <table>.json holds the full pre-change rows. Restore = INSERT the data array back (additive-only policy means the tables still exist)."
+}
