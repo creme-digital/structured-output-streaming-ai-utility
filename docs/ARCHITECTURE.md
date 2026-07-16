@@ -161,10 +161,17 @@ isolation or integrity benefit.
 ## Streaming + parsing pipeline, in order
 
 1. `ChatPanel` → `useChat.sendMessage(text)`: inserts the user's `chat_messages` row,
-   then `fetch("/api/chat", { messages: history, accessToken })`. `accessToken` (Cycle 4
-   / FR-009) is the caller's own Supabase session token, forwarded so the edge function
-   can read *their own* previously-logged titles — it is never persisted or used for
-   anything besides that one RLS-scoped read.
+   builds `historyForModel` (the running conversation, de-duplicated by message id —
+   PRD v8 / Cycle 9 / FR-002, closing a latent "send this turn twice" risk found while
+   auditing the stale-response bug, see "Assumptions & decisions"), then
+   `fetch("/api/chat", { method: "POST", cache: "no-store", body: { messages:
+   historyForModel, accessToken } })`. `cache: "no-store"` (PRD v8 / Cycle 9 / FR-002)
+   is defense-in-depth ruling out the browser HTTP cache as a stale-response vector — the
+   audit found no caching layer anywhere in this path, so this is a hardening measure,
+   not a fix for an observed cache hit. `accessToken` (Cycle 4 / FR-009) is the caller's
+   own Supabase session token, forwarded so the edge function can read *their own*
+   previously-logged titles — it is never persisted or used for anything besides that
+   one RLS-scoped read.
 2. Edge function (`fetchExistingTitlesMessage`) best-effort reads the caller's own
    `items.item` values via a fresh, per-request Supabase client authenticated with that
    same access token (never the service role — PostgREST/RLS evaluates `auth.uid()` off
@@ -192,11 +199,25 @@ isolation or integrity benefit.
    matches (Cycle 6 / FR-008) are dispatched independently — a single reply could in
    principle carry one of each, though the system prompt asks for that only when the
    user's message both states an opinion and asks for a recommendation in the same turn:
-   - one or more valid `<ADD>`/`<UPDATE>` matches → insert into `items` (both tags
-     insert; `<UPDATE>` never overwrites, always `status: "watched"`), footnote
+   - one or more valid `<ADD>`/`<UPDATE>` matches → `<ADD>` inserts a new `items` row;
+     `<UPDATE>` (since Cycle 8) updates the caller's existing row for that title
+     in place (falling back to an insert if none exists), always setting
+     `status: "watched"` — a compound message (PRD v8 / Cycle 9) may carry several
+     `<ADD>`/`<UPDATE>` matches in one reply, each dispatched independently. Footnote
      `Saved · <name>` for a rated `<ADD>`, `Want to watch · <name>` (`tone="watchlist"`,
      Cycle 6 / FR-005) for `<ADD status="want_to_watch" />`, or `Rating updated · <name>`
      (`tone="update"`) for `<UPDATE>` (including the want-to-watch → watched transition);
+     multiple matches in one turn merge into one footnote (`Saved · A, B`). **Before
+     this branch is accepted** (PRD v8 / Cycle 9 / FR-003/FR-004), if the user's message
+     reads as genuinely compound (`countLikelyOpinions(userText) >= 2`,
+     `opinionHeuristic.ts`) the matched titles are checked against the message's own
+     opinion-bearing segments (`findUncapturedOpinionSegments`); if any segment isn't
+     accounted for and attempts remain, the **whole turn** is silently retried (not just
+     the missing tag) exactly like the no-tag retry below. If all 3 whole-turn attempts
+     still leave a segment uncaptured, whatever DID get tagged is still written (never
+     discarded for a sibling opinion's failure) and the outcome becomes `partial_multi`:
+     one `parse_failures` row (`reason: "missing"`) plus a footnote naming every
+     uncaptured opinion (`Didn't catch: "..."`, folded alongside any success footnote);
    - a valid `<RECOMMEND>` match (Cycle 6 / FR-008) → no database write, rendered as a
      distinct `RecommendationCard` (not the footnote pill) under the assistant's bubble;
    - a recognized-but-malformed `<ADD>`/`<UPDATE>`/`<RECOMMEND>` tag → log to
@@ -208,13 +229,15 @@ isolation or integrity benefit.
      (`reason: "unrecognized_title"`), shown as an ordinary conversational reply with
      no footnote (expected behavior, not a failure);
    - no tag, and `looksLikeLoggableOpinion(userText)` (`opinionHeuristic.ts`, extended in
-     Cycle 6 to also recognize rewatch/changed-opinion phrasing — see "Assumptions &
-     decisions") is true → **FR-004 Issue 1 retry loop**: silently re-run this whole
-     attempt (steps 2–5) up to 2 more times (3 attempts total), discarding every failed
-     attempt's streamed text entirely — the user only ever sees the *last* attempt's
-     output. If an attempt in the loop finally produces a tag, it's handled by the
-     branches above as normal. If all 3 attempts produce no tag, log `reason: "missing"`
-     once, neutral footnote;
+     Cycle 6 to also recognize rewatch/changed-opinion phrasing, and in Cycle 9/PRD v8 to
+     also recognize bare sentiment-only phrasing with no explicit number — "I hated
+     Barbie" — see "Assumptions & decisions") is true → **FR-004 Issue 1 retry loop**:
+     silently re-run this whole attempt (steps 2–5) up to 2 more times (3 attempts
+     total), discarding every failed attempt's streamed text entirely — the user only
+     ever sees the *last* attempt's output. This is the same loop the compound-message
+     whole-turn retry above reuses. If an attempt in the loop finally produces a tag,
+     it's handled by the branches above as normal. If all 3 attempts produce no tag, log
+     `reason: "missing"` once, neutral footnote;
    - no tag, opinion-heuristic false, but `looksLikeRecommendationRequest(userText)`
      (`recommendationHeuristic.ts`, Cycle 6 / FR-008) is true AND the caller told
      `useChat` the user has at least one rated item (`hasRatedItems`, sourced from
@@ -243,15 +266,15 @@ isolation or integrity benefit.
 
 | FR | Requirement | Where it lives |
 |---|---|---|
-| FR-001 | System prompt driving inline `<ADD>`/`<UPDATE>`/`<RECOMMEND>` emission, rating inference, conservative temperature, unrecognized-title clarification, action-integrity guard, want-to-watch variant | `src/lib/systemPrompt.ts` (`SYSTEM_PROMPT`, `buildExistingTitlesMessage`, `buildRecommendationContextMessage` — Cycle 6, imported by the edge function); `src/lib/openaiRequest.ts` (`OPENAI_TEMPERATURE = 0.2`, documented in-file); contract asserted by `src/lib/__tests__/systemPrompt.test.ts` and `openaiRequest.test.ts` |
-| FR-002 | Token-by-token streaming | `netlify/edge-functions/chat.ts` (SSE passthrough, no buffering) + `src/lib/sseParser.ts` (incremental decode) + `src/features/chat/useChat.ts` (`reader.read()` loop updates React state per chunk) — unchanged this cycle |
-| FR-003 | Generic, position-independent tag parser | `src/lib/tagParser.ts` — `TagRegistry`/`extractTags` engine is tag-agnostic (Cycle 6: `requiredAttrs` may now be a function of the tag's own attributes, so `<ADD>`'s `rating` is conditionally required — needed for the want-to-watch variant without weakening `<ADD>`'s malformed-detection); `createDefaultTagRegistry()` registers **three** definitions, `ADD_TAG_DEFINITION`, `UPDATE_TAG_DEFINITION`, and `RECOMMEND_TAG_DEFINITION` (Cycle 6 — finishing FR-008, see "Assumptions & decisions") |
-| FR-004 | Graceful failure (malformed/missing/ambiguous/off-topic, no silent failure) + silent-retry + unrecognized-title logging + missing-`<RECOMMEND>` logging | `src/features/chat/useChat.ts` (`runAttempt`/retry loop, all branches) + `src/lib/opinionHeuristic.ts` (missing-vs-ordinary-chat classifier, extended Cycle 6 for rewatch/changed-opinion phrasing) + `src/lib/recommendationHeuristic.ts` (Cycle 6, missing-`<RECOMMEND>` classifier, gated by `hasRatedItems`, no retry) + `src/lib/titleClarificationHeuristic.ts` (unrecognized-title classifier) + `parse_failures` table (`reason` includes `unrecognized_title`, `supabase/migrations/005_...sql`) |
+| FR-001 | System prompt driving inline `<ADD>`/`<UPDATE>`/`<RECOMMEND>` emission, rating inference, conservative temperature, unrecognized-title clarification (mainstream titles must not misfire), action-integrity guard, want-to-watch variant, one tag per distinct opinion in a compound message | `src/lib/systemPrompt.ts` (`SYSTEM_PROMPT`, `buildExistingTitlesMessage`, `buildRecommendationContextMessage` — Cycle 6; Cycle 9/PRD v8 tightened the sentiment-only-still-tags, mainstream-title-recognition, and one-tag-per-opinion wording, imported by the edge function); `src/lib/openaiRequest.ts` (`OPENAI_TEMPERATURE = 0.2`, documented in-file); `src/features/chat/useChat.ts` (`historyForModel` dedup by message id + `cache: "no-store"` — Cycle 9, closing the stale-response defect); contract asserted by `src/lib/__tests__/systemPrompt.test.ts` and `openaiRequest.test.ts` |
+| FR-002 | Token-by-token streaming; every distinct message gets a genuinely fresh streamed response (no stale/replayed output) | `netlify/edge-functions/chat.ts` (SSE passthrough, no buffering) + `src/lib/sseParser.ts` (incremental decode) + `src/features/chat/useChat.ts` (`reader.read()` loop updates React state per chunk; Cycle 9/PRD v8 added `cache: "no-store"` on the `fetch` and id-based dedup of `historyForModel` as defense-in-depth against a stale/cached response — no caching layer was actually found, see "Assumptions & decisions") |
+| FR-003 | Generic, position-independent tag parser, no cap on tags per stream | `src/lib/tagParser.ts` — `TagRegistry`/`extractTags` engine is tag-agnostic and was already uncapped (extracts every match of every registered tag, not just the first per type); `createDefaultTagRegistry()` registers **three** definitions, `ADD_TAG_DEFINITION`, `UPDATE_TAG_DEFINITION`, and `RECOMMEND_TAG_DEFINITION` (Cycle 6 — finishing FR-008). `src/features/chat/useChat.ts` already dispatched every `<ADD>`/`<UPDATE>` match independently; Cycle 9/PRD v8 closed the real compound-message gap one layer up — the system prompt only asking for one tag per reply — plus added the whole-turn retry that detects a *partially*-tagged compound message (see FR-004) |
+| FR-004 | Graceful failure (malformed/missing/ambiguous/off-topic, no silent failure) + silent-retry + unrecognized-title logging + missing-`<RECOMMEND>` logging + whole-turn retry for partially-tagged compound messages | `src/features/chat/useChat.ts` (`runAttempt`/retry loop, all branches; Cycle 9/PRD v8 added the `partial_multi` outcome and its whole-turn silent retry) + `src/lib/opinionHeuristic.ts` (missing-vs-ordinary-chat classifier, extended Cycle 6 for rewatch/changed-opinion phrasing and Cycle 9/PRD v8 for bare sentiment-only phrasing plus `countLikelyOpinions`/`identifyOpinionSegments`/`findUncapturedOpinionSegments` for compound-message detection) + `src/lib/recommendationHeuristic.ts` (Cycle 6, missing-`<RECOMMEND>` classifier, gated by `hasRatedItems`, no retry) + `src/lib/titleClarificationHeuristic.ts` (unrecognized-title classifier, unchanged this cycle — see "Assumptions & decisions") + `parse_failures` table (`reason` includes `unrecognized_title`, `supabase/migrations/005_...sql`) |
 | FR-005 | Clean minimal chat UI with write confirmation + distinct "rating updated"/"want to watch" badges + `<RECOMMEND>` card | `src/features/chat/ChatPanel.tsx` (streaming caret via `MessageBubble`'s `streaming` prop, `Badge` footnote for confirmation/failure, `RecommendationCard` — Cycle 6) + `src/components/ui/` (`Badge` tones `update`/`watchlist`) + `src/components/layout/AppShell.tsx` |
 | FR-006 | Email/password auth, persisted chat, per-user isolation | `src/context/AuthContext.tsx`, `src/features/auth/AuthScreen.tsx`, RLS policies in all `supabase/migrations/*.sql` files (unchanged this cycle; the new `items.status` column and realtime publication registration in `006_...sql` don't touch RLS — isolation is still `auth.uid() = user_id` throughout) |
 | FR-007 | Netlify deployment + deliverables, incl. the edge-function build/deploy fix | `netlify.toml` (build command + SPA publish dir), `public/_redirects` (SPA fallback routing); the actual deploy, repo link, and written summary are produced by this pipeline's later (docs/deploy) step, not by app code. `netlify/edge-functions/chat.ts`'s `@supabase/supabase-js` import is a Deno-native `https://esm.sh/@supabase/supabase-js@2.110.3` ESM URL; locked in by `netlify/edge-functions/__tests__/chat.imports.test.ts` |
 | FR-008 | Personalized, on-request `<RECOMMEND>` tag, grounded in rated (non-watchlist) items only | **Finished this cycle** (Cycle 6) — see "Assumptions & decisions" for why it had been carried forward unbuilt for three prior cycles. `src/lib/tagParser.ts` (`RECOMMEND_TAG_DEFINITION`, display-only), `src/lib/systemPrompt.ts` (`buildRecommendationContextMessage`, rated-only grounding + prompt rules), `netlify/edge-functions/chat.ts` (`fetchUserItemContext`), `src/features/chat/useChat.ts` (recommendation dispatch, no DB write), `src/features/chat/RecommendationCard.tsx` (distinct card) |
-| FR-009 | `<UPDATE>` as a third inline tag type: model-side fuzzy re-mention matching, insert-with-history, distinct "rating updated" badge, want-to-watch → watched transition | `src/lib/systemPrompt.ts` (`buildExistingTitlesMessage` + ADD-vs-UPDATE prompt rules, now spans both statuses) + `netlify/edge-functions/chat.ts` (`fetchUserItemContext`, RLS-scoped per-request read of the caller's own titles) + `src/lib/tagParser.ts` (`UPDATE_TAG_DEFINITION`) + `src/features/chat/useChat.ts` (insert dispatch, always `status: "watched"`, `tone="update"` footnote) + `src/components/ui/Badge.tsx` (`"update"` tone) |
+| FR-009 | `<UPDATE>` as a third inline tag type: model-side fuzzy re-mention matching, in-place update (since Cycle 8; originally insert-with-history in Cycles 4–7), distinct "rating updated" badge, want-to-watch → watched transition | `src/lib/systemPrompt.ts` (`buildExistingTitlesMessage` + ADD-vs-UPDATE prompt rules, now spans both statuses) + `netlify/edge-functions/chat.ts` (`fetchUserItemContext`, RLS-scoped per-request read of the caller's own titles) + `src/lib/tagParser.ts` (`UPDATE_TAG_DEFINITION`) + `src/features/chat/useChat.ts` (finds the caller's existing row for the title case-insensitively and updates `rating`/`status`/`raw_user_text` in place, always setting `status: "watched"`, falling back to an insert for a never-logged title; `tone="update"` footnote) + `supabase/migrations/008_items_true_update.sql` (`items_update_own` RLS policy + one-time dedupe) + `src/components/ui/Badge.tsx` (`"update"` tone) |
 | FR-010 | Live history panel, "Rated"/"Want to Watch" tabs, realtime | `src/features/history/useHistory.ts` (RLS-scoped read + `supabase.channel(...)` realtime subscription on `items` INSERT), `src/features/history/HistoryPanel.tsx`/`.css` (presentational, `Tabs` primitive), `src/pages/Home.tsx` (wires `useHistory` into both `HistoryPanel` and `ChatPanel`'s `hasRatedItems`), `supabase/migrations/006_items_status_and_realtime.sql` (publication registration) |
 
 ## Test coverage as built
@@ -270,37 +293,65 @@ isolation or integrity benefit.
   depends on (tag shape, rating scale documented, ADD-vs-UPDATE rules, unrecognized-title
   clarification instruction, and Cycle 6's want-to-watch variant, `<RECOMMEND>` rules,
   and action-integrity guard), `buildExistingTitlesMessage`, and (Cycle 6)
-  `buildRecommendationContextMessage` (dedup, cap, null-when-empty, ignores unrated rows).
+  `buildRecommendationContextMessage` (dedup, cap, null-when-empty, ignores unrated rows);
+  (Cycle 9/PRD v8) asserts the prompt names all four previously-misrejected mainstream
+  films, states recognition has "no external list you are being checked against", tells
+  the model never to withhold a tag for sentiment-only phrasing, and instructs one tag
+  per distinct opinion in a compound message.
 - `src/lib/__tests__/openaiRequest.test.ts` — request body shape (`stream: true`, model,
   `temperature: 0.2`).
 - `src/lib/__tests__/opinionHeuristic.test.ts` — opinion-signal classification cases,
-  including (Cycle 6) rewatch/changed-opinion phrasing with no first-time sentiment word.
+  including (Cycle 6) rewatch/changed-opinion phrasing with no first-time sentiment word,
+  and (Cycle 9/PRD v8) a "sentiment-only phrasing, no explicit number" describe block plus
+  `splitOpinionSegments`/`countLikelyOpinions`/`findUncapturedOpinionSegments` coverage
+  (single- vs. compound-opinion counting, identifying which segment's title was never
+  tagged, treating everything as uncaptured when nothing matched).
+- `src/lib/__tests__/watchlistHeuristic.test.ts` — (Cycle 7) missed want-to-watch-intent
+  classification, so a tagless "I want to watch X" reply engages the same
+  retry-then-log-`missing` safety net as a missed `<ADD>`/`<UPDATE>`.
 - `src/lib/__tests__/recommendationHeuristic.test.ts` — (Cycle 6) recommendation-request
   classification cases.
 - `src/lib/__tests__/titleClarificationHeuristic.test.ts` — recognizes the model's "don't
-  recognize ... movie" clarification phrasing, rejects unrelated replies.
+  recognize ... movie" clarification phrasing, rejects unrelated replies. Unchanged since
+  Cycle 4; Cycle 9/PRD v8's title-recognition fix lives entirely in `systemPrompt.ts`'s
+  wording (see "Assumptions & decisions"), not here.
+- `src/styles/__tests__/theme.test.ts` — pins the `#A0B9BF` accent and its dark contrast
+  color, and asserts no retired purple hex remains in `theme.css` (FR-005 regression
+  guard).
 - `src/context/__tests__/AuthContext.test.tsx`, `src/features/auth/__tests__/AuthScreen.test.tsx`
   — sign-up/sign-in error surfacing, the email-confirmation branch.
 - `src/features/chat/__tests__/useChat.test.ts`, `ChatPanel.test.tsx` — history loading,
   sending, footnote rendering, the silent-retry loop (succeeds on a later attempt /
   exhausts all 3 / never retries a malformed or unrecognized-title reply), `<UPDATE>`
-  insert-not-overwrite dispatch and its distinct footnote, and (Cycle 6) the
+  in-place update dispatch (Cycle 8) and its distinct footnote, and (Cycle 6) the
   want-to-watch `<ADD>` dispatch (null rating, `watchlist` footnote), the want-to-watch
   → watched `<UPDATE>` transition, rewatch phrasing engaging the same retry-then-log
   safety net, and `<RECOMMEND>` dispatch (display-only, `hasRatedItems`-gated
-  missing-recommendation logging).
+  missing-recommendation logging). (Cycle 9/PRD v8) sentiment-only phrasing engaging the
+  full 3-attempt retry (both the eventually-succeeds and the never-resolves cases,
+  asserting the resulting `parse_failures` row), the compound-message whole-turn retry
+  (partial-tag attempt discarded, full retry re-runs both opinions), the
+  `partial_multi` fallback after all 3 attempts still miss an opinion (partial success
+  kept, uncaptured opinion named in the footnote and logged), and the `historyForModel`
+  de-dup-by-id + `cache: "no-store"` regression guards for the stale-response fix.
 - `src/features/history/__tests__/useHistory.test.ts`, `HistoryPanel.test.tsx` — (Cycle 6)
   initial load split into rated/watchlist (uncollapsed — multiple rows per title stay
   separate), load-error handling, realtime INSERT events routed to the correct tab
   without a manual refresh, channel cleanup on unmount, and the presentational
-  tab-switching/empty/loading/error states.
+  tab-switching/empty/loading/error states; (Cycle 8) realtime `UPDATE` events replacing
+  an entry in place, including a watchlist → Rated move.
 - `src/__tests__/App.test.tsx` — auth gating (no session → `AuthScreen`; session →
   `ChatPanel` + sign-out), and a non-crashing fallback when history load fails.
+- `netlify/edge-functions/__tests__/chat.imports.test.ts` — (Cycle 5) static source-text
+  assertions pinning the Deno-native `esm.sh` Supabase import and its version match with
+  `package.json`.
 
 All Supabase calls are exercised against `src/test/mockSupabase.ts`, a minimal fake of
 the `.from(table).select/.eq/.order/.insert` surface plus (Cycle 6)
-`.channel(...).on(...).subscribe()`/`removeChannel(...)` this app actually uses — no live
-Supabase project or network access is required to run the suite.
+`.channel(...).on(...).subscribe()`/`removeChannel(...)`, and (Cycle 8)
+`.update(...).eq(...)` call recording, `.ilike(...)`, a chainable `.order().limit()`,
+per-table read rows, and per-event realtime handlers — no live Supabase project or
+network access is required to run the suite. 177 tests pass as of this cycle.
 
 ## Assumptions & decisions
 
@@ -739,3 +790,134 @@ history design.
   (`updateCalls`), `ilike`, a chainable `order().limit()`, per-table read rows
   (`rowsForTable`), and per-event realtime handlers so INSERT and UPDATE registrations
   don't clobber each other.
+
+### Cycle 9 (PRD v8 — sentiment-only logging, title-recognition over-correction, compound multi-opinion messages, stale-response bug)
+
+**A numbering note first, since it looks like an off-by-two.** This file's own numbering
+is `Cycle N = PRD v(N+1)` through Cycle 6 (PRD v7). Cycles 7 and 8 above broke that
+pattern: they were live-site incident fixes, made and self-documented directly in this
+file by the commits that shipped them (`a8c32c3`, `f68cfdf`), without a docs-step pass
+and without reference to the PRD-version numbering — they simply picked the next free
+number after "Cycle 6." This work order is PRD v8, which under the original pattern
+would be "Cycle 7" (and is labeled that way in `DESIGN.md`, written independently by
+this cycle's design step), but that number is already taken in *this* file for an
+unrelated change. Rather than have two different "Cycle 7" sections mean two different
+things in the same document, this entry is filed as **Cycle 9** — the next number in
+this file's actual sequence — with this note so a reader isn't left wondering why the
+count jumped. `README.md`'s "Current status" section cross-references this same Cycle 9
+label.
+
+This work order (`change_log` v8) amends FR-001/FR-002/FR-003/FR-004 only, fixing four
+correctness defects found in live pressure testing. No schema change; no migration.
+
+- **Sentiment-only phrasing ("I hated Barbie") previously produced no `parse_failures`
+  row at all — confirmed a heuristic gap, not a model-compliance problem.** The dev's
+  own diagnosis (`change_request_id fdd2478b`, question 1: "no parse_failures row at
+  all") ruled out the alternative explanation (the model refusing to tag even under
+  retry) before any code was touched: if the retry loop had engaged and still failed,
+  a `reason: "missing"` row would exist regardless. Its absence means
+  `looksLikeLoggableOpinion` never recognized the message as an opinion in the first
+  place, so the 2-retry safety net (Cycle 4) never got a chance to run. The fix is
+  additive patterns in `opinionHeuristic.ts`'s existing keyword-list approach — the same
+  documented, brittle-by-design tradeoff as every previous heuristic extension here —
+  plus a systemPrompt.ts clause telling the model explicitly not to withhold a tag for
+  lack of an explicit number. QA's mock-server evidence shows the full 3-attempt loop
+  now engaging for this phrasing class in both directions: eventually succeeding
+  (`FR-004-1-sentiment-only-retry-success.png`) and genuinely exhausting all 3 attempts
+  into a real `parse_failures` row (`FR-004-2-sentiment-only-never-resolves.png`) —
+  closing the "silent, invisible" failure mode specifically, not just improving the
+  model's hit rate.
+- **The mainstream-title-rejection defect had no local gate to remove — the PRD's own
+  candidate root cause didn't hold up under inspection.** The dev was unsure whether
+  `src/lib/titleClarificationHeuristic.ts` contained a hardcoded allowlist/pattern
+  overriding model judgment (`change_request_id fdd2478b`, question 2: "not sure...").
+  `git diff f68cfdf..3dc0b8a -- src/lib/titleClarificationHeuristic.ts` shows the file
+  untouched this cycle, and its full contents (unchanged since Cycle 4) only ever
+  pattern-match the *model's own reply* for the "don't recognize ... movie" phrasing —
+  there is not, and never was, a client/edge-side list of movie titles anywhere in this
+  codebase. The actual defect was in the *prompt's wording*: `systemPrompt.ts`'s
+  original instruction ("if you do not recognize it... do NOT emit") gave the model no
+  guidance on which way to err, and it drifted toward over-caution on real films. The
+  fix names the four reported false-negatives (`The Big Short`, `A Star Is Born`,
+  `American History X`, `The Departed`) as must-recognize examples and adds "there is no
+  external list you are being checked against... err on the side of recognizing a
+  title," while keeping the fabricated-title path intact (`Point Break 2` still
+  triggers clarification, confirmed in QA). This stays within the existing
+  model-knowledge-only, no-TMDb boundary — it is a prompt-bias correction, not a new
+  verification mechanism, so obscure-but-real titles remain an accepted known
+  limitation.
+- **The compound-message defect's real bottleneck was the system prompt and the
+  retry/heuristic layer, not the parser or the dispatcher — both of which were already
+  correct.** Both the design and build steps independently confirmed
+  `tagParser.ts`'s `extractTags` was never capped to one match per tag type, and
+  `useChat.ts` already looped over every `<ADD>`/`<UPDATE>` match and merged their
+  confirmations into one footnote (`parts.length > 1` branch, present since at least
+  Cycle 6, previously exercised defensively even though the prompt never asked for more
+  than one tag). So "no hardcoded cap" (the dev's confirmed direction) required no
+  parser or dispatch change at all — the system prompt's "emit at most one of `<ADD>`
+  or `<UPDATE>` per reply" instruction was the actual cap, and removing it is FR-003's
+  entire code change. The harder half of this defect was FR-004: detecting when a
+  compound reply *silently* under-delivers (tags some but not all opinions) requires
+  reasoning about the user's own message, which is new logic —
+  `opinionHeuristic.ts`'s `countLikelyOpinions`/`findUncapturedOpinionSegments` (a
+  deliberately mechanical clause-splitter on commas/semicolons/"but"/"although"/
+  "though"/"while"/"whereas" — not a real parser, just enough for the PRD's own
+  compound examples) feeding a new `partial_multi` outcome in `useChat.ts`'s retry loop.
+- **Whole-turn retry, not per-tag retry, for a partially-tagged compound message — per
+  the dev's confirmed direction** (`change_request_id fdd2478b`, question 1: "existing
+  2-retry loop to re-run the whole turn"). A partially-successful attempt is discarded
+  in full and the entire turn re-sent, exactly like a fully-missing tag (Cycle 4); this
+  reuses `MAX_ATTEMPTS` and the existing discard/no-partial-credit-per-attempt
+  semantics rather than inventing a second retry mechanism. The `isCompound` gate
+  (`countLikelyOpinions(trimmed) >= 2`) specifically prevents a single opinion phrased
+  across a comma or "but" (e.g. "I finally watched Dune, loved it") from being
+  misclassified as partial — that message counts as exactly one opinion, so the new
+  code path never engages and single-opinion dispatch is provably unchanged (QA
+  confirmed the pre-existing single-opinion scenarios still pass unmodified).
+- **After all 3 whole-turn attempts, partial success is kept — never discarded for a
+  sibling opinion's failure — and every uncaptured opinion is named, per FR-004's "no
+  silent drops."** `partial_multi` is dispatched through the exact same insert path as
+  `success`; the opinions that DID tag are written and confirmed normally. The ones that
+  didn't produce a `parse_failures` row (`reason: "missing"`, consistent with every
+  other retry-exhausted case) and a footnote naming them verbatim
+  (`Didn't catch: "hated Aftersun"`), best-effort matched via
+  `findUncapturedOpinionSegments`'s "does the tagged title's text appear in this
+  segment" heuristic — approximate by design, since knowing which segment maps to
+  which tag is otherwise the model's job, not the client's.
+- **The stale-response bug's root cause was audited, not assumed, and no caching layer
+  was found** — the PRD itself left the root cause open ("stale closure, cached
+  promise, or chat-history mis-assembly... left to the build agent to locate"). The
+  build step traced the full request path (`useChat.ts` → `fetch` → edge function →
+  OpenAI) and found no service worker, no HTTP client with its own cache, and no
+  `Cache-Control` response header that would make a stale revalidation possible. Two
+  hardening changes were made anyway as defense-in-depth against the *class* of bug the
+  PRD named, even without a smoking gun: `fetch(..., { cache: "no-store" })` rules out
+  the browser HTTP cache categorically, and `historyForModel` now filters out any
+  message already present in `messagesRef.current` by id before appending the current
+  turn's user message, rather than assuming it's always still absent — a distinct,
+  latent "send this turn's message twice" risk the audit surfaced along the way (not
+  itself the confirmed repro, but in the same family and cheap to close). QA reproduced
+  the exact confirmed repro (`Obsession (2026)`/backrooms clarification, then an
+  unrelated "Wolfs was just ok") against a scripted mock server and confirmed turn 2
+  gets its own fresh fetch and its own distinct, correctly-tagged reply — not the prior
+  turn's text.
+- **No change to `tagParser.ts`, `sseParser.ts`, `titleClarificationHeuristic.ts`,
+  `recommendationHeuristic.ts`, `watchlistHeuristic.ts`, the edge function, any
+  migration, RLS policy, or CSS/theme file this cycle** — confirmed by `git show --stat`
+  against `3dc0b8a`, which touches exactly `useChat.ts`, `opinionHeuristic.ts`,
+  `systemPrompt.ts`, and their tests. FR-005/FR-008/FR-009/FR-010 are named in the PRD's
+  own migration notes only as regression smoke-tests sharing the touched code path, not
+  as amended FRs, and QA's pass confirms none of them regressed (multiple tags in one
+  turn render as one merged footnote without crashing or dropping information, per the
+  existing Cycle 9 FR-003 finding above).
+- **QA verified this cycle's behavioral changes against a scripted mock server, not a
+  live OpenAI call** (no `OPENAI_API_KEY` in the QA sandbox, consistent with every prior
+  cycle) — the sentiment-only retry engagement, the mainstream-title prompt wording, the
+  compound one-shot and whole-turn-retry dispatch, the partial-after-3-attempts
+  fallback, and the stale-response regression guard were all exercised end-to-end
+  against the real frontend/parser/Supabase code path with scripted model responses
+  standing in for OpenAI's HTTP contract; the model's actual live compliance with the
+  new prompt wording is marked `not_verifiable` in `qa-evidence/report.json` for the
+  handful of criteria that can only be confirmed against a live OpenAI call (e.g. "the
+  function calls the OpenAI API and does not use a hardcoded/mock response"), not
+  because the code path itself was untested.
