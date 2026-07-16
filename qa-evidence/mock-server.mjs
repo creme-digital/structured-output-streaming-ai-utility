@@ -181,6 +181,115 @@ const SCRIPTS = [
       "you!",
     ],
   },
+
+  // ================= PRD v8 (Cycle 8) scenarios =================
+  {
+    // FR-001/FR-004: sentiment-only phrasing, no explicit number/rating word. The model
+    // misses the tag on its first 2 attempts and complies on the 3rd - proves the
+    // EXTENDED opinion-heuristic (previously this class of phrasing produced NO
+    // parse_failures row at all, meaning the retry safety net never engaged; now it
+    // does) recovers a compliance miss exactly like an explicit-rating phrasing would.
+    match: /hated barbie/i,
+    words: (call) => {
+      if (call < 3) return ["That's ", "understandable ", "- ", "not ", "every ", "movie ", `clicks (attempt ${call}).`];
+      return ["Got ", "it, ", "noted. ", '<ADD item="Barbie" rating="1" />'];
+    },
+  },
+  {
+    // FR-001/FR-004: sentiment-only phrasing that NEVER resolves across all 3 attempts ->
+    // must still fall through to fallback + parse_failures (reason "missing"), closing
+    // the confirmed defect where sentiment-only misses produced NO parse_failures row.
+    match: /disliked cats/i,
+    words: (call) => ["Fair ", "enough, ", "tastes ", "vary ", `(attempt ${call}).`],
+  },
+  {
+    // FR-001: mainstream real film that a prior over-correcting gate would have wrongly
+    // vetoed - proves the client dispatch path has no hardcoded title gate of its own
+    // and logs it exactly like any other recognized <ADD>.
+    match: /loved the big short/i,
+    words: ["Great ", "pick! ", '<ADD item="The Big Short" rating="5" />'],
+  },
+  {
+    // FR-001: a genuinely fabricated sequel title must still correctly trigger the
+    // unrecognized-title clarification path (proves the fix didn't just make the model
+    // accept everything).
+    match: /point break 2 was amazing/i,
+    words: [
+      "Hmm, ",
+      "I ",
+      "don't ",
+      "recognize ",
+      "that ",
+      "as ",
+      "a ",
+      "real ",
+      "movie ",
+      "- ",
+      "could ",
+      "you ",
+      "double-check ",
+      "the ",
+      "title?",
+    ],
+  },
+  {
+    // FR-001/FR-003/FR-004: compound two-opinion message, both tags land in one attempt.
+    match: /hated chicago, but i loved a star is born/i,
+    words: [
+      "Noted ",
+      "both! ",
+      '<ADD item="Chicago" rating="1" /> ',
+      '<ADD item="A Star Is Born" rating="5" />',
+    ],
+  },
+  {
+    // FR-001/FR-003/FR-004: compound message that's only partially tagged on the first
+    // whole-turn attempt, then fully resolves on the retry - proves whole-turn (not
+    // per-tag) retry semantics.
+    match: /hated her, but loved dunkirk/i,
+    words: (call) => {
+      if (call === 1) return ["Noted ", "the ", "Dunkirk ", "one. ", '<ADD item="Dunkirk" rating="5" />'];
+      return ["Got ", "both ", "down. ", '<ADD item="Her" rating="1" /> ', '<ADD item="Dunkirk" rating="5" />'];
+    },
+  },
+  {
+    // FR-001/FR-003/FR-004: compound message where one opinion NEVER resolves across all
+    // 3 whole-turn attempts -> the opinion that DID resolve is still saved, and the
+    // unresolved one is visibly named in the fallback, never silently dropped. Both
+    // segments must independently read as opinions to the client heuristic (unlike a
+    // vague "felt nothing" clause), so "hated Aftersun" is used deliberately.
+    match: /loved interstellar, but hated aftersun/i,
+    words: (call) => ["Noted ", "the ", "Interstellar ", "one. ", '<ADD item="Interstellar" rating="5" />'],
+  },
+  {
+    // PRD v8 / FR-002 stale-response regression repro: an unrelated first turn about a
+    // fabricated title...
+    match: /obsession \(2026\) in the backrooms/i,
+    words: [
+      "Hmm, ",
+      "I ",
+      "don't ",
+      "recognize ",
+      "that ",
+      "as ",
+      "a ",
+      "real ",
+      "movie ",
+      "- ",
+      "could ",
+      "you ",
+      "double-check ",
+      "the ",
+      "title?",
+    ],
+  },
+  {
+    // ...followed by a completely unrelated second turn. The confirmed live bug replayed
+    // the FIRST turn's clarification verbatim for this message; a fresh call must
+    // produce this distinct scripted reply instead.
+    match: /wolfs was just ok/i,
+    words: ["Glad ", "it ", "was ", "decent ", "- ", 'thanks for sharing! <ADD item="Wolfs" rating="3" />'],
+  },
 ];
 const DEFAULT_WORDS = ["Tell ", "me ", "more ", "about ", "what ", "you ", "watched."];
 
