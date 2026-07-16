@@ -33,8 +33,24 @@ describe("SYSTEM_PROMPT (FR-001 AC3: reviewable in the repo)", () => {
     expect(SYSTEM_PROMPT).toMatch(/don't recognize.*movie/i);
   });
 
-  it("caps tag emission to at most one of <ADD> or <UPDATE> per reply", () => {
-    expect(SYSTEM_PROMPT).toMatch(/never both/i);
+  it("instructs the model to emit one <ADD>/<UPDATE> tag per distinct opinion, no cap, for compound messages (PRD v8 / FR-001/FR-003)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/one <ADD>\/<UPDATE> tag per distinct movie\/opinion/i);
+    expect(SYSTEM_PROMPT).toMatch(/no cap\s+on how many tags/i);
+    expect(SYSTEM_PROMPT).toMatch(/never drop one silently/i);
+  });
+
+  it("instructs the model that sentiment-only phrasing with no explicit number must still produce a tag (PRD v8 / FR-001/FR-004)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/sentiment-only phrasing/i);
+    expect(SYSTEM_PROMPT).toMatch(/i hated barbie/i);
+    expect(SYSTEM_PROMPT).toMatch(/never withhold a tag merely because the user gave no numeric\s+rating/i);
+  });
+
+  it("instructs the model that title recognition defers entirely to its own knowledge and must not reject mainstream real films (PRD v8 / FR-001)", () => {
+    expect(SYSTEM_PROMPT).toMatch(/the big short/i);
+    expect(SYSTEM_PROMPT).toMatch(/a star is born/i);
+    expect(SYSTEM_PROMPT).toMatch(/american history x/i);
+    expect(SYSTEM_PROMPT).toMatch(/the departed/i);
+    expect(SYSTEM_PROMPT).toMatch(/no external list you are\s+being checked against/i);
   });
 
   it("documents the want-to-watch <ADD status=\"want_to_watch\" /> variant with rating omitted (Cycle 6 / FR-001)", () => {

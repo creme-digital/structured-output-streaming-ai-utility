@@ -64,3 +64,56 @@ export function looksLikeLoggableOpinion(text: string): boolean {
   if (trimmed.length < 4) return false;
   return OPINION_SIGNALS.some((pattern) => pattern.test(trimmed));
 }
+
+/**
+ * PRD v8 / FR-001/FR-003/FR-004 (compound multi-opinion messages): splits `text` into
+ * rough clause-level segments on common conjunctions/punctuation, so a compound message
+ * with more than one distinct opinion (e.g. "I hated Chicago, but I loved A Star is
+ * Born") can be reasoned about per-opinion instead of as one blob. This is deliberately
+ * mechanical — comma/semicolon/sentence-end/"but"/"although"/"though"/"while"/"whereas" —
+ * not a real clause parser, just enough to separate the PRD's own compound examples.
+ */
+const OPINION_SEGMENT_SPLIT = /,|;|\.(?:\s+|$)|\b(?:but|although|though|while|whereas)\b/i;
+
+export function splitOpinionSegments(text: string): string[] {
+  return text
+    .split(OPINION_SEGMENT_SPLIT)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The subset of `splitOpinionSegments(text)` that themselves read as an opinion (the
+ * same word list `looksLikeLoggableOpinion` checks against the whole message, applied
+ * per-segment instead). This is what lets a compound message be recognized as carrying
+ * MULTIPLE distinct loggable opinions rather than just one.
+ */
+export function identifyOpinionSegments(text: string): string[] {
+  return splitOpinionSegments(text).filter((segment) => OPINION_SIGNALS.some((pattern) => pattern.test(segment)));
+}
+
+/**
+ * How many distinct loggable opinions `text` appears to express. Used by `useChat.ts`
+ * to decide whether a turn is a "compound" multi-opinion message (>= 2) that warrants
+ * the whole-turn retry-until-every-opinion-is-tagged discipline (FR-004), rather than
+ * the ordinary single-opinion missing-tag path.
+ */
+export function countLikelyOpinions(text: string): number {
+  return identifyOpinionSegments(text).length;
+}
+
+/**
+ * Of the opinion-bearing segments in `text`, which ones do NOT mention any of
+ * `matchedTitles` (case-insensitive substring match) — i.e. which expressed opinions the
+ * tags the model actually emitted don't appear to account for. Best-effort only: it has
+ * no real understanding of which segment maps to which tag (that's the model's job), so
+ * it approximates "captured" as "the tagged title's text appears somewhere in this
+ * segment." Used to name unmatched opinions in the fallback message after all retries
+ * are exhausted (FR-004: "no silent drops").
+ */
+export function findUncapturedOpinionSegments(text: string, matchedTitles: string[]): string[] {
+  const lowerTitles = matchedTitles.map((title) => title.trim().toLowerCase()).filter(Boolean);
+  return identifyOpinionSegments(text).filter(
+    (segment) => !lowerTitles.some((title) => segment.toLowerCase().includes(title)),
+  );
+}

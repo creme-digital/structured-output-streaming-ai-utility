@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeLoggableOpinion } from "../opinionHeuristic";
+import {
+  countLikelyOpinions,
+  findUncapturedOpinionSegments,
+  looksLikeLoggableOpinion,
+  splitOpinionSegments,
+} from "../opinionHeuristic";
 
 describe("looksLikeLoggableOpinion", () => {
   it("recognizes strong positive sentiment", () => {
@@ -46,5 +51,54 @@ describe("looksLikeLoggableOpinion — changed-opinion / rewatch phrasing (Cycle
 
   it("recognizes 'second viewing' phrasing", () => {
     expect(looksLikeLoggableOpinion("On my second viewing of Dune I liked it a lot more")).toBe(true);
+  });
+});
+
+describe("looksLikeLoggableOpinion — sentiment-only phrasing, no explicit number (PRD v8 / FR-001/FR-004)", () => {
+  it.each(["I hated Barbie", "I disliked Cats", "I loved Dune"])(
+    "recognizes %s as a loggable opinion with no explicit rating word/number",
+    (text) => {
+      expect(looksLikeLoggableOpinion(text)).toBe(true);
+    },
+  );
+});
+
+describe("splitOpinionSegments / countLikelyOpinions / findUncapturedOpinionSegments (PRD v8 / FR-004: compound multi-opinion messages)", () => {
+  it("splits a compound 'but' message into its two opinion clauses", () => {
+    expect(splitOpinionSegments("I hated Chicago, but I loved A Star is Born")).toEqual([
+      "I hated Chicago",
+      "I loved A Star is Born",
+    ]);
+  });
+
+  it("counts a single-opinion message as exactly one opinion", () => {
+    expect(countLikelyOpinions("I loved Inception")).toBe(1);
+  });
+
+  it("counts a compound two-opinion message as two opinions", () => {
+    expect(countLikelyOpinions("I hated Chicago, but I loved A Star is Born")).toBe(2);
+  });
+
+  it("counts an ambiguous, opinion-less message as zero opinions", () => {
+    expect(countLikelyOpinions("the movie was okay")).toBe(0);
+  });
+
+  it("identifies neither segment as uncaptured once both matched titles are accounted for", () => {
+    expect(findUncapturedOpinionSegments("I hated Chicago, but I loved A Star is Born", ["Chicago", "A Star is Born"])).toEqual(
+      [],
+    );
+  });
+
+  it("identifies the segment whose title was never tagged", () => {
+    expect(findUncapturedOpinionSegments("I hated Chicago, but I loved A Star is Born", ["Chicago"])).toEqual([
+      "I loved A Star is Born",
+    ]);
+  });
+
+  it("treats every segment as uncaptured when nothing was matched at all", () => {
+    expect(findUncapturedOpinionSegments("I hated Chicago, but I loved A Star is Born", [])).toEqual([
+      "I hated Chicago",
+      "I loved A Star is Born",
+    ]);
   });
 });

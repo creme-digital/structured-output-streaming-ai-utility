@@ -720,6 +720,152 @@ describe("useChat — missed want-to-watch <ADD> gets the retry-then-log safety 
   });
 });
 
+describe("useChat — compound multi-opinion messages dispatch multiple tags, no cap (PRD v8 / FR-001/FR-003/FR-004)", () => {
+  it("dispatches two <ADD> tags from one compound message in a single attempt, inserting both items and merging both confirmations", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          streamingResponse(
+            'Noted both! <ADD item="Chicago" rating="1" /> <ADD item="A Star is Born" rating="5" />',
+          ),
+        ),
+      ),
+    );
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I hated Chicago, but I loved A Star is Born");
+    });
+
+    const itemInserts = fakeSupabase.insertCalls.filter((c) => c.table === "items");
+    expect(itemInserts).toHaveLength(2);
+    expect(itemInserts.map((c) => c.payload.item)).toEqual(["Chicago", "A Star is Born"]);
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.footnote).toEqual({ tone: "success", text: "Saved · Chicago, A Star is Born" });
+    expect(fakeSupabase.insertCalls.some((c) => c.table === "parse_failures")).toBe(false);
+  });
+
+  it("whole-turn retries a compound message that's only partially tagged, then succeeds once every opinion resolves", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() =>
+        Promise.resolve(streamingResponse('Noted the Chicago one. <ADD item="Chicago" rating="1" />')),
+      )
+      .mockImplementationOnce(() =>
+        Promise.resolve(
+          streamingResponse(
+            'Got both down. <ADD item="Chicago" rating="1" /> <ADD item="A Star is Born" rating="5" />',
+          ),
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I hated Chicago, but I loved A Star is Born");
+    });
+
+    // The first, partial attempt must be discarded entirely — no insert from it.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const itemInserts = fakeSupabase.insertCalls.filter((c) => c.table === "items");
+    expect(itemInserts).toHaveLength(2);
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.content).toBe("Got both down.");
+    expect(assistantMessage.footnote).toEqual({ tone: "success", text: "Saved · Chicago, A Star is Born" });
+    expect(fakeSupabase.insertCalls.some((c) => c.table === "parse_failures")).toBe(false);
+  });
+
+  it("after 3 whole-turn attempts still only partially tagged, saves what WAS captured and visibly names what wasn't — never a silent drop", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(streamingResponse('Noted the Chicago one. <ADD item="Chicago" rating="1" />')),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I hated Chicago, but I loved A Star is Born");
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // The opinion that DID resolve is still saved — never discarded just because its
+    // sibling opinion in the same message never tagged.
+    const itemInserts = fakeSupabase.insertCalls.filter((c) => c.table === "items");
+    expect(itemInserts).toHaveLength(1);
+    expect(itemInserts[0].payload.item).toBe("Chicago");
+
+    expect(
+      fakeSupabase.insertCalls.some((c) => c.table === "parse_failures" && c.payload.reason === "missing"),
+    ).toBe(true);
+
+    const assistantMessage = result.current.messages[1];
+    expect(assistantMessage.footnote).toEqual({
+      tone: "success",
+      text: 'Saved · Chicago · Didn\'t catch: "I loved A Star is Born"',
+    });
+  });
+});
+
+describe("useChat — regression guard: every new message triggers a fresh call, never a stale/cached reply (PRD v8 / FR-002)", () => {
+  it("sends the fetch request with cache: 'no-store' so no HTTP cache layer can ever serve a stale response", async () => {
+    const fetchMock: ReturnType<typeof vi.fn> = vi.fn(() => Promise.resolve(streamingResponse("Sure, tell me more.")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("hi there");
+    });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.cache).toBe("no-store");
+  });
+
+  it("two distinct, unrelated messages never produce byte-identical assistant output (the 'Wolfs was just ok' repro)", async () => {
+    const fetchMock: ReturnType<typeof vi.fn> = vi
+      .fn()
+      .mockImplementationOnce(() =>
+        Promise.resolve(
+          streamingResponse("I don't recognize that as a real movie — could you double-check the title?"),
+        ),
+      )
+      .mockImplementationOnce(() => Promise.resolve(streamingResponse("Glad it was decent — thanks for sharing!")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useChat(USER_ID));
+    await waitFor(() => expect(result.current.historyStatus).toBe("ready"));
+
+    await act(async () => {
+      await result.current.sendMessage("I watched Obsession (2026) in the backrooms");
+    });
+    const firstReply = result.current.messages.find((m) => m.role === "assistant")?.content;
+
+    await act(async () => {
+      await result.current.sendMessage("Wolfs was just ok");
+    });
+    const assistantReplies = result.current.messages.filter((m) => m.role === "assistant");
+    const secondReply = assistantReplies[assistantReplies.length - 1]?.content;
+
+    expect(secondReply).not.toBe(firstReply);
+    // Each turn's request body must reflect that turn's own latest user message, not a
+    // stale/earlier one.
+    const secondRequestBody = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const lastUserTurn = [...secondRequestBody.messages].reverse().find((m) => m.role === "user");
+    expect(lastUserTurn?.content).toBe("Wolfs was just ok");
+  });
+});
+
 describe("useChat — unrecognized-title clarification (Cycle 4 / FR-001 Issue 2, FR-004)", () => {
   it("logs 'unrecognized_title' and does not retry when the model asks for clarification", async () => {
     const fetchMock = vi.fn(() =>

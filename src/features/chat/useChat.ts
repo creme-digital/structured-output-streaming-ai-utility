@@ -10,7 +10,12 @@ import {
   stripTrailingPartialTag,
   UpdateTagAttrs,
 } from "../../lib/tagParser";
-import { looksLikeLoggableOpinion } from "../../lib/opinionHeuristic";
+import {
+  countLikelyOpinions,
+  findUncapturedOpinionSegments,
+  identifyOpinionSegments,
+  looksLikeLoggableOpinion,
+} from "../../lib/opinionHeuristic";
 import { looksLikeRecommendationRequest } from "../../lib/recommendationHeuristic";
 import { looksLikeWatchlistIntent } from "../../lib/watchlistHeuristic";
 import { looksLikeUnrecognizedTitleClarification } from "../../lib/titleClarificationHeuristic";
@@ -37,6 +42,16 @@ const MAX_ATTEMPTS = 3;
  */
 type AttemptOutcome =
   | { kind: "success"; extract: ExtractResult; rawBuffer: string; finalDisplay: string }
+  | {
+      // PRD v8 / FR-004: a compound multi-opinion message where the model tagged SOME
+      // but not all of the distinct opinions it expressed, discovered only after this
+      // whole attempt finished streaming (see the "whole-turn retry" note below).
+      kind: "partial_multi";
+      extract: ExtractResult;
+      rawBuffer: string;
+      finalDisplay: string;
+      missingSegments: string[];
+    }
   | { kind: "malformed"; extract: ExtractResult; rawBuffer: string; finalDisplay: string }
   | { kind: "unrecognized_title"; rawBuffer: string; finalDisplay: string }
   | { kind: "no_tag_retryable"; rawBuffer: string }
@@ -172,7 +187,17 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
       // live; see docs/ARCHITECTURE.md, Cycle 7). Assistant turns with no model-visible
       // form (compliance misses, malformed turns, legacy rows) are dropped entirely —
       // a user turn with no assistant reply is harmless, a poisoned reply is not.
-      const historyForModel = [...messagesRef.current, userMessage]
+      // PRD v8 / FR-002 (stale-response hardening): `messagesRef.current` reflects
+      // whatever the last COMMITTED render saw. In production (a real network await
+      // below, unlike a synchronous test mock), React has ample time to commit the
+      // `setMessages` call above before this line runs, so `messagesRef.current` may
+      // ALREADY include this exact `userMessage` object. Explicitly de-duplicating by id
+      // (rather than assuming it's always still absent) guarantees the model is sent
+      // this turn's user message exactly once no matter how that timing lands — a
+      // latent "send the same turn twice" chat-history mis-assembly risk this cycle's
+      // audit found and closed, distinct from (but in the same family as) the stale/
+      // cached-response defect this cycle's regression guard targets below.
+      const historyForModel = [...messagesRef.current.filter((m) => m.id !== userMessage.id), userMessage]
         .filter((m) => m.status !== "error")
         .filter((m) => m.role === "user" || m.modelContent !== undefined)
         .map((m) => ({ role: m.role, content: m.role === "user" ? m.content : m.modelContent! }));
@@ -194,6 +219,15 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
+          // PRD v8 / FR-002: explicitly opt out of the HTTP cache. Every turn's request
+          // body is already unique (it always carries this turn's full history, see
+          // above), so this is defense-in-depth rather than a fix for an observed cache
+          // hit — audited and found no caching layer anywhere in this path (no service
+          // worker, no HTTP library with its own cache, no Cache-Control response header
+          // that would make this a stale revalidation candidate) — but ruling the
+          // browser HTTP cache out categorically costs nothing and directly answers the
+          // "cached promise" candidate root cause this cycle's work order named.
+          cache: "no-store",
           body: JSON.stringify({
             messages: historyForModel,
             ...(accessToken ? { accessToken } : {}),
@@ -305,6 +339,48 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
             break;
           }
 
+          if (attemptOutcome.kind === "success") {
+            // PRD v8 / FR-003/FR-004: a compound message ("I hated Chicago, but I loved
+            // A Star is Born") may come back with tags for only SOME of its distinct
+            // opinions — extract.matches.length > 0 alone doesn't mean every opinion was
+            // captured. Only apply this check when the user's own message reads as
+            // genuinely compound (>= 2 distinct opinion-bearing segments) — a single
+            // opinion phrased across a comma/"but" (e.g. "I finally watched Dune, loved
+            // it") must NOT be misclassified as "partial": `countLikelyOpinions` returns
+            // 1 for that case, so the gate below never fires and existing single-opinion
+            // dispatch behavior is unchanged. For a genuinely compound message, compare
+            // what was actually tagged against how many opinions were expressed; if some
+            // are still unaccounted for, this is the SAME "compliance miss" class FR-004
+            // already retries for a fully-missing tag — re-run the WHOLE turn (discarding
+            // this attempt entirely, per the dev's confirmed whole-turn-not-per-tag
+            // semantics) rather than silently keeping only the opinions that did land.
+            const itemMatches = attemptOutcome.extract.matches.filter((m) => m.tag === "ADD" || m.tag === "UPDATE");
+            const isCompound = countLikelyOpinions(trimmed) >= 2;
+            const missingSegments = isCompound
+              ? findUncapturedOpinionSegments(
+                  trimmed,
+                  itemMatches.map((m) => (m.attrs as { item: string }).item),
+                )
+              : [];
+            const attemptsRemain = attempt < MAX_ATTEMPTS;
+
+            if (missingSegments.length > 0 && attemptsRemain) {
+              continue; // whole-turn silent retry — discard this attempt entirely
+            }
+
+            outcome =
+              missingSegments.length > 0
+                ? {
+                    kind: "partial_multi",
+                    extract: attemptOutcome.extract,
+                    rawBuffer: attemptOutcome.rawBuffer,
+                    finalDisplay: attemptOutcome.finalDisplay,
+                    missingSegments,
+                  }
+                : attemptOutcome;
+            break;
+          }
+
           outcome = attemptOutcome;
           break;
         }
@@ -360,9 +436,18 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
             if (outcome.missKind) {
               await logParseFailure(outcome.rawBuffer, "missing");
             }
+            // PRD v8 / FR-004: when NOTHING got tagged across all 3 whole-turn attempts
+            // and the message reads as compound (>= 2 distinct opinions), name every
+            // opinion that went uncaptured instead of the generic single-opinion
+            // fallback — "no silent drops" applies just as much to the fully-missed case
+            // as to the partially-missed one. A genuinely single-opinion miss keeps the
+            // exact pre-existing generic text (compoundSegments.length is 1 there).
+            const compoundSegments = outcome.missKind === "opinion" ? identifyOpinionSegments(trimmed) : [];
             const footnote: FootnoteInfo | undefined =
               outcome.missKind === "opinion"
-                ? { tone: "neutral", text: "Didn't catch an item to log there." }
+                ? compoundSegments.length > 1
+                  ? { tone: "neutral", text: `Didn't catch: ${compoundSegments.map((s) => `"${s}"`).join(", ")}` }
+                  : { tone: "neutral", text: "Didn't catch an item to log there." }
                 : outcome.missKind === "watchlist"
                   ? { tone: "neutral", text: "Didn't catch a watchlist add there." }
                   : outcome.missKind === "recommendation"
@@ -381,10 +466,15 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
             break;
           }
 
-          case "success": {
+          case "success":
+          case "partial_multi": {
             // Cycle 6 / FR-003/FR-008: <ADD>/<UPDATE> write a row; <RECOMMEND> is
             // display-only (FR-008) and never touches the database, so the two tag
-            // families are dispatched independently here.
+            // families are dispatched independently here. PRD v8 / FR-004: "partial_multi"
+            // reaches here too — the opinions that DID get tagged are written exactly
+            // like a full success (never silently discarded just because a sibling
+            // opinion in the same compound message didn't resolve); the ones that didn't
+            // are surfaced below instead.
             const itemMatches = outcome.extract.matches.filter((m) => m.tag === "ADD" || m.tag === "UPDATE");
             const recommendMatches = outcome.extract.matches.filter((m) => m.tag === "RECOMMEND");
 
@@ -486,12 +576,30 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
                 if (parts.length === 1) {
                   footnote = parts[0];
                 } else if (parts.length > 1) {
-                  // Defensive: the system prompt asks for at most one of <ADD>/<UPDATE>
-                  // per reply, but don't assume — surface every confirmation rather
-                  // than silently dropping one.
+                  // PRD v8 / FR-003: the system prompt now explicitly asks for one
+                  // <ADD>/<UPDATE> tag PER distinct opinion in a compound message, so
+                  // multiple parts here is the expected common case (not just a
+                  // defensive fallback) — surface every confirmation, never collapse or
+                  // silently drop one.
                   footnote = { tone: parts[0].tone, text: parts.map((p) => p.text).join(" · ") };
                 }
               }
+            }
+
+            if (outcome.kind === "partial_multi") {
+              // PRD v8 / FR-004: after MAX_ATTEMPTS whole-turn retries, this compound
+              // message still has opinions the model never tagged. Never drop them
+              // silently — log it (same "missing" reason a fully-missed tag gets) and
+              // fold a visible, named callout into the footnote alongside whatever DID
+              // get saved above.
+              await logParseFailure(outcome.rawBuffer, "missing");
+              const missNote: FootnoteInfo = {
+                tone: "neutral",
+                text: `Didn't catch: ${outcome.missingSegments.map((s) => `"${s}"`).join(", ")}`,
+              };
+              footnote = footnote
+                ? { tone: footnote.tone, text: `${footnote.text} · ${missNote.text}` }
+                : missNote;
             }
 
             // Cycle 6 / FR-008: fire-and-forget, display-only — no DB write, rendered
@@ -515,7 +623,7 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
         const persistedContent =
           outcome.kind === "malformed" || outcome.kind === "unrecognized_title" || outcome.kind === "no_tag_final"
             ? outcome.finalDisplay
-            : outcome.kind === "success"
+            : outcome.kind === "success" || outcome.kind === "partial_multi"
               ? outcome.finalDisplay
               : undefined;
 
@@ -526,6 +634,7 @@ export function useChat(userId: string, accessToken?: string, hasRatedItems?: bo
           // malformed turns so they are never replayed to the model as history.
           const persistedRawContent =
             outcome.kind === "success" ||
+            outcome.kind === "partial_multi" ||
             outcome.kind === "unrecognized_title" ||
             (outcome.kind === "no_tag_final" && outcome.missKind === null)
               ? outcome.rawBuffer
