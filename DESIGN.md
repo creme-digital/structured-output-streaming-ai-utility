@@ -275,3 +275,48 @@ no design work was needed for them beyond that badge.
 Verified `npm run build` (`tsc --noEmit && vite build`) exits 0, and the full existing
 `vitest` suite (90 tests, unchanged) still passes against these additions — nothing in
 this cycle altered behavior any existing test asserts on.
+
+## Cycle 7 (PRD v8 — sentiment-only logging, title-recognition over-correction,
+compound multi-opinion messages, stale-response bug)
+
+**No design changes.** This work order (change_log v8) amends FR-001/FR-002/FR-003/
+FR-004 only — four correctness defects found in pressure testing: sentiment-only
+phrasing not engaging the opinion-heuristic, a title-recognition gate over-rejecting
+mainstream real films, compound messages silently dropping all but one opinion, and a
+stale/cached response replaying a prior turn's raw output. Read every touched file
+before concluding this:
+
+- **FR-001/FR-004 (heuristic + prompt fixes)**: `systemPrompt.ts`, `opinionHeuristic.ts`,
+  `titleClarificationHeuristic.ts` are plain prompt copy and regex-based classification
+  logic with zero rendering surface. A repo-wide search confirms there is no separate
+  client/edge-side title allowlist or hardcoded movie list to "remove" a gate from — the
+  fix is entirely inside the system prompt's own instructions and/or the heuristic's
+  pattern list. No new visible state results from any of this: a clarifying question is
+  ordinary assistant prose (already rendered), and a still-failing sentiment-only
+  message falls through to the existing danger-toned fallback badge/parse_failures path
+  that's shipped since Cycle 4.
+- **FR-002 (stale-response bug)**: confirmed no caching layer exists anywhere in the
+  streaming path (`useChat.ts`, `sseParser.ts`, `openaiRequest.ts`, the edge function) —
+  whatever the root cause turns out to be (stale closure, cached promise, history
+  mis-assembly), it is exclusively backend/state-handling, not a rendering concern.
+- **FR-003 (multi-tag dispatch, no cap)**: `tagParser.ts`'s `extractTags` already walks
+  the *entire* input and collects every recognized tag into `matches: TagMatch[]` — it
+  was never capped to the first match per type at the parser-engine level. `useChat.ts`
+  already loops over every `<ADD>`/`<UPDATE>` match with `Promise.all` and merges their
+  confirmations into one `Badge` via existing tone/text composition (defensive code
+  already present, anticipating exactly this case). The only actual blocker to emitting
+  multiple tags per turn is the **system prompt's own instruction** ("Emit at most one of
+  `<ADD>` or `<UPDATE>` per reply") — pure prompt-copy, no parser or component change
+  needed. `MessageBubble`'s `footnote` slot is typed `ReactNode` (not a single fixed
+  shape), so it can already hold however many `Badge`s a compound turn produces without
+  any interface change.
+- **FR-005 (badge rendering) is explicitly NOT amended this cycle** — the PRD lists it
+  only as a regression smoke-test ("must handle multiple tags landing in one turn"), and
+  the existing merge-into-one-badge behavior already satisfies that without crashing or
+  dropping information. Per the touch-only-what's-required rule, no new badge layout,
+  no footnote-array type change, and no new primitive were introduced for an FR this
+  cycle doesn't amend — redesigning a working, unamended surface would itself be the
+  regression this pipeline exists to prevent.
+
+Verified `npm run build` (`tsc --noEmit && vite build`) exits 0 against the pre-existing
+`src/` tree — this cycle touches no file under `src/`, `index.html`, or `package.json`.
